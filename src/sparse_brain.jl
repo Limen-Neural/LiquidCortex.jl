@@ -486,7 +486,7 @@ end
 
 """
     ensemble_step!(eb, u, gpu_temp, basys_load, funding_rate, liquidation_vol, liquidity_delta;
-                   dydx_oi_delta, dydx_funding_rate)
+                   reflex_eta, dydx_oi_delta, dydx_funding_rate)
 
 Step all 4 lobes independently on the same input, then aggregate readouts.
 
@@ -500,23 +500,26 @@ dYdX OI Arousal: positive OI delta signals accumulation → lowers effective
 Reflex Gating: When |liquidity_delta| > 0.1 (significant on-chain event),
   the Fast lobe (index 1, τ_m=10ms) gets a 5× learning rate boost,
   enabling "flash-learning" — rapid synaptic adaptation to liquidity shocks.
+
+Keyword `reflex_eta` (default [`ETA`](@ref)) is the base STDP rate for every lobe; the Fast lobe uses `5× reflex_eta` when reflex gating is active.
 """
 function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32},
     gpu_temp::Float32, basys_load::Float32,
     funding_rate::Float32, liquidation_vol::Float32,
     liquidity_delta::Float32;
+    reflex_eta::Float32=ETA,
     dydx_oi_delta::Float32=0.0f0,
     dydx_funding_rate::Float32=0.0f0)
     # Reflex Gating: boost Fast lobe STDP when on-chain liquidity shifts
     reflex_fast = if abs(liquidity_delta) > 0.1f0
-        ETA * 5.0f0   # 5× flash-learning rate
+        reflex_eta * 5.0f0   # 5× flash-learning rate
     else
-        ETA            # Normal learning rate
+        reflex_eta            # Normal learning rate
     end
 
     # Step all lobes with institutional inhibition signals
     for (i, lobe) in enumerate(eb.lobes)
-        eta_lobe = (i == 1) ? reflex_fast : ETA  # Lobe 1 = Fast
+        eta_lobe = (i == 1) ? reflex_fast : reflex_eta  # Lobe 1 = Fast
         step!(lobe, u, gpu_temp, basys_load;
             funding_rate=funding_rate,
             liquidation_vol=liquidation_vol,
@@ -572,8 +575,7 @@ end
     step!(eb::EnsembleBrain, u, gpu_temp, basys_load; funding_rate, liquidation_vol, ...)
 
 Same positional and keyword shape as [`step!`](@ref) for [`SparseBrain`](@ref); forwards to [`ensemble_step!`](@ref).
-Keyword `liquidity_delta` (default `0`) controls fast-lobe reflex gating in the ensemble. Keyword `reflex_eta`
-is accepted for call compatibility but is not forwarded (per-lobe reflex is derived from `liquidity_delta` and `ETA`).
+Keyword `liquidity_delta` (default `0`) controls fast-lobe reflex gating in the ensemble. Keyword `reflex_eta` is forwarded as the base per-lobe STDP rate (Fast lobe uses `5× reflex_eta` when gating is active).
 """
 function step!(eb::EnsembleBrain, u::CuVector{Float32}, gpu_temp::Float32, basys_load::Float32;
     funding_rate::Float32=0.0f0, liquidation_vol::Float32=0.0f0,
@@ -582,6 +584,7 @@ function step!(eb::EnsembleBrain, u::CuVector{Float32}, gpu_temp::Float32, basys
     dydx_funding_rate::Float32=0.0f0,
     liquidity_delta::Float32=0.0f0)
     ensemble_step!(eb, u, gpu_temp, basys_load, funding_rate, liquidation_vol, liquidity_delta;
+        reflex_eta=reflex_eta,
         dydx_oi_delta=dydx_oi_delta, dydx_funding_rate=dydx_funding_rate)
     return nothing
 end
