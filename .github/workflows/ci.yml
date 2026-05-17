@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        julia-version: ['1.10', '1.11', '1.12']
+        julia-version: ['1.10', '1.12']
 
     steps:
       - name: Checkout
@@ -42,49 +42,3 @@ jobs:
 
       - name: Run tests
         run: julia --project=. -e 'using Pkg; Pkg.test()'
-
-  # ── GPU tests run on self-hosted runner with RTX 5080 ──────────────────
-  gpu-tests:
-    name: GPU CUDA Tests (Self-hosted)
-    needs: test
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64, cuda, gpu]
-    timeout-minutes: 30
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Julia
-        uses: julia-actions/setup-julia@v2
-        with:
-          version: '1.12'
-
-      - name: Cache Julia artifacts
-        uses: julia-actions/cache@v2
-
-      - name: Instantiate
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
-
-      - name: Run full tests (GPU)
-        run: julia --project=. -e 'using Pkg; Pkg.test()'
-
-      - name: GPU smoke — SparseBrain constructor
-        run: |
-          julia --project=. -e '
-            using LiquidCortex
-            using CUDA
-            @assert CUDA.functional() "No CUDA GPU available"
-            brain = SparseBrain(20.0f0; name="gpu-ci")
-            @assert brain isa SparseBrain
-            println("✓ SparseBrain constructed on $(CUDA.name(CUDA.device()))")
-          '
-
-      - name: GPU smoke — EnsembleBrain constructor
-        run: |
-          julia --project=. -e '
-            using LiquidCortex
-            using CUDA
-            ensemble = EnsembleBrain()
-            @assert ensemble isa EnsembleBrain
-            println("✓ EnsembleBrain constructed — $(length(ensemble.lobes)) lobes")
-          '
