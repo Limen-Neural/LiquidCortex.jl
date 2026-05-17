@@ -28,29 +28,29 @@ using CUDA
         @test isdefined(LiquidCortex, :pulse_to_input)
     end
 
+    @testset "MarketPulse decode" begin
+        # Build a minimal 120-byte buffer (zeros)
+        buf = zeros(UInt8, 120)
+        # Set timestamp at offset 0 (UInt64)
+        buf[1:8] = reinterpret(UInt8, [UInt64(42)])
+        # Set first float at offset 8 (dnx_price = 1.0f32)
+        buf[9:12] = reinterpret(UInt8, [Float32(1.0)])
+
+        pulse = decode_market_pulse(buf)
+        @test pulse.timestamp_ns == 42
+        @test pulse.dnx_price ≈ 1.0f0
+
+        # pulse_to_input returns 14-element vector
+        input_vec = pulse_to_input(pulse)
+        @test length(input_vec) == 14
+    end
+
     if CUDA.functional()
         @testset "GPU: SparseBrain constructor" begin
             brain = SparseBrain(20.0f0; name="test")
             @test brain isa SparseBrain
             @test brain.tau_m == 20.0f0
             @test brain.tick_count == 0
-        end
-
-        @testset "GPU: MarketPulse decode" begin
-            # Build a minimal 120-byte buffer (zeros)
-            buf = zeros(UInt8, 120)
-            # Set timestamp at offset 0 (UInt64)
-            buf[1:8] = reinterpret(UInt8, [UInt64(42)])
-            # Set first float at offset 8 (dnx_price = 1.0f32)
-            buf[9:12] = reinterpret(UInt8, [Float32(1.0)])
-
-            pulse = decode_market_pulse(buf)
-            @test pulse.timestamp_ns == 42
-            @test pulse.dnx_price ≈ 1.0f0
-
-            # pulse_to_input returns 14-element vector
-            input_vec = pulse_to_input(pulse)
-            @test length(input_vec) == 14
         end
     else
         @info "Skipping GPU tests — no CUDA device available"
