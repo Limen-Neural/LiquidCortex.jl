@@ -70,7 +70,7 @@ using LiquidCortex
 
     # ── GPU tests (only run when CUDA is available) ──────────────────────────
 
-    if CUDA.functional()
+    if LiquidCortex._cuda_available[]
         @testset "GPU: SparseBrain constructor" begin
             brain = SparseBrain(20.0f0; name="test")
             @test brain isa SparseBrain
@@ -85,6 +85,7 @@ using LiquidCortex
         end
 
         @testset "GPU: pulse_to_input returns CuVector" begin
+            using CUDA
             buf = zeros(UInt8, 120)
             pulse = decode_market_pulse(buf)
             input_vec = pulse_to_input(pulse)
