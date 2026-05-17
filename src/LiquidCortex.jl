@@ -46,7 +46,7 @@ include("market_pulse.jl")
 # ── Public API ───────────────────────────────────────────────────────────────
 
 export SparseBrain, EnsembleBrain
-export step!, get_output, get_ensemble_output
+export step!, ensemble_step!, get_output, get_ensemble_output
 export compute_reservoir_covariance!, diagnostics, ensemble_diagnostics
 export MarketPulse, decode_market_pulse, pulse_to_input
 

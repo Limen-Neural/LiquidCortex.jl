@@ -12,18 +12,28 @@ const REF_N = 2048
 const REF_IN = 16
 const REF_OUT = 16
 
-# Persistent state (stored in module scope)
-if !isdefined(Main, :reservoir_initialized)
-    # Use float32 for performance on RTX 5080
-    global W = CUDA.randn(Float32, REF_N, REF_N) .* 0.02f0
-    # Spectral radius check is slow; using empirical initialization for dense matrix.
+# Lazy GPU state — initialized on first `run_lsm_step` when CUDA is functional.
+const _market_lsm_lock = ReentrantLock()
+_market_lsm_initialized = false
 
-    global Win = CUDA.randn(Float32, REF_N, REF_IN) .* 0.5f0
-    global Wout = CUDA.randn(Float32, REF_OUT, REF_N) .* 0.1f0
+function _ensure_market_reservoir_locked!()
+    global W, Win, Wout, x, _market_lsm_initialized
+    _market_lsm_initialized && return nothing
+    CUDA.functional() ||
+        error("run_lsm_step requires a CUDA-capable GPU (CUDA.functional() == false)")
+    W = CUDA.randn(Float32, REF_N, REF_N) .* 0.02f0
+    Win = CUDA.randn(Float32, REF_N, REF_IN) .* 0.5f0
+    Wout = CUDA.randn(Float32, REF_OUT, REF_N) .* 0.1f0
+    x = CUDA.zeros(Float32, REF_N)
+    _market_lsm_initialized = true
+    return nothing
+end
 
-    global x = CUDA.zeros(Float32, REF_N)
-
-    global reservoir_initialized = true
+function _ensure_market_reservoir!()
+    lock(_market_lsm_lock) do
+        _ensure_market_reservoir_locked!()
+    end
+    return nothing
 end
 
 """
@@ -33,6 +43,7 @@ end
 `inhibit_val`: Hardware thermal stress [0.0, 1.0]
 """
 function run_lsm_step(inputs_vec::Vector{Float32}, inhibit_val::Float32)
+    _ensure_market_reservoir!()
     global x, W, Win, Wout
 
     # Move inputs to GPU
