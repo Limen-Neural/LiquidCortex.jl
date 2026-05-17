@@ -1,6 +1,6 @@
-name = "SpikenautLSM"
+name = "LiquidCortex"
 uuid = "1f75a0df-502a-4be0-9310-97a9e2e7f166"
-version = "0.1.0"
+version = "0.2.0"
 license = "GPL-3.0-or-later"
 
 [deps]
@@ -19,4 +19,4 @@ test = ["Test"]
 
 [compat]
 CUDA = "5"
-julia = "1.9, 1.10, 1.11, 1.12"
+julia = "1.10, 1.11, 1.12"

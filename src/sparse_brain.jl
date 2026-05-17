@@ -1,10 +1,9 @@
 # sparse_brain.jl — Ensemble 65,536-Neuron Sparse CUDA Liquid State Machine
 #
-# Spikenaut V2 "Brain" — 4-Lobe Ensemble Architecture
-# Subscribes to the Rust Nervous System via ZMQ IPC.
+# LiquidCortex V2 "Brain" — 4-Lobe Ensemble Architecture
 #
 # Architecture:
-#   4 parallel lobes (Scalper, Day, Swing, Macro) × 65,536 LIF neurons each
+#   4 parallel lobes × 65,536 LIF neurons each
 #   Varying time constants: τ_m ∈ {10ms, 25ms, 50ms, 100ms}
 #   Xavier/Glorot W_out initialization (breaks zero-readout deadlock)
 #   Sparse connectivity (1% connection probability, Float16 weights)
@@ -23,9 +22,6 @@
 #   Covariance working memory (8192²):            ≈ 0.5 GB
 #   Total peak: ~12–14 GB VRAM
 #
-# Usage:
-#   julia --project=spikenaut-capital/brain sparse_brain.jl
-#
 # ═══════════════════════════════════════════════════════════════════════════════
 
 using CUDA
@@ -40,7 +36,7 @@ using Printf
 const N = 65_536        # Reservoir neuron count per lobe
 const N_IN = 14            # Input receptors (7 assets × 2: price_norm, volatility)
 const N_OUT = 16            # Output neurons (8 bull/bear pairs)
-const N_ASSETS = 7             # DNX, Quai, Qubic, Kaspa, Monero, Ocean, Verus
+const N_ASSETS = 7             # Number of input asset channels
 const CONN_PROB = 0.01          # 1% sparse connectivity → ~42M non-zero synapses
 const DT = 1.0f0         # Simulation timestep (normalized to tick interval)
 const HIST_DEPTH = 1000          # Rolling history depth (ticks) for deep temporal covariance
@@ -48,11 +44,11 @@ const COV_SUBSAMPLE = 8192          # Subsampled neurons for tractable covarianc
 
 # ── Lobe time constants (membrane τ_m in ms) ─────────────────────────────────
 const LOBE_TAUS = Float32[10.0, 25.0, 50.0, 100.0]
-const LOBE_NAMES = ["Scalper", "Day", "Swing", "Macro"]
+const LOBE_NAMES = ["Fast", "Medium", "Slow", "Integrator"]
 const N_LOBES = 4
 
 # ── Ensemble Aggregation Weights ─────────────────────────────────────────────
-# Scalper reacts fastest → highest weight for immediate signals
+# Fast lobe reacts quickest → highest weight for immediate signals
 const LOBE_WEIGHTS = Float32[0.4, 0.3, 0.2, 0.1]
 
 # ── Ornstein-Uhlenbeck SDE Parameters ────────────────────────────────────────
@@ -81,123 +77,6 @@ const OU_NOISE_SCALE = SIGMA * sqrt(DT)
 const TEMP_THRESH = 75.0f0    # °C — start increasing spike threshold
 const BUFFER_THRESH = 0.8f0     # FPGA buffer load — start increasing threshold
 const INHIB_GAIN = 15.0f0    # mV increase per unit of inhibition signal
-
-# ── MarketPulse packed struct layout (120 bytes from Rust) ────────────────────
-# Canonical channel order: DNX(0), Quai(1), Qubic(2), Kaspa(3), Monero(4), Ocean(5), Verus(6)
-# [0..8]    timestamp_ns: UInt64
-# [8..16]   dnx:    (price_norm f32, volatility f32)  Ch 0
-# [16..24]  quai:   (price_norm f32, volatility f32)  Ch 1
-# [24..32]  qubic:  (price_norm f32, volatility f32)  Ch 2
-# [32..40]  kaspa:  (price_norm f32, volatility f32)  Ch 3
-# [40..48]  monero: (price_norm f32, volatility f32)  Ch 4
-# [48..56]  ocean:  (price_norm f32, volatility f32)  Ch 5
-# [56..64]  verus:  (price_norm f32, volatility f32)  Ch 6
-# [64..68]  confidence_signal: f32   ← dYdX-derived stress or 0.0
-# [68..72]  coinglass_funding_rate: f32        ← Global Inhibition (zeroed)
-# [72..76]  coinglass_liquidation_volume: f32  ← brain_stress proxy
-# [76..80]  dex_liquidity_delta: f32           ← zeroed
-# [80..84]  l3_order_imbalance: f32            ← zeroed
-# [84..88]  gpu_temp_c: f32
-# [88..92]  gpu_power_w: f32
-# [92..96]  gpu_util_pct: f32
-# [96..100] basys_uart_buffer_load: f32
-# [100..104] dydx_oi_delta: f32               ← dYdX BTC-USD OI arousal signal
-# [104..108] dydx_funding_rate: f32           ← dYdX BTC-USD funding tension
-# [108..112] qubic_tick_trace: f32            ← Qubic tick decay
-# [112..116] qubic_tick_rate: f32             ← Qubic tick rate norm
-# [116..120] qubic_epoch_progress: f32        ← Qubic epoch progress
-
-struct MarketPulse
-    timestamp_ns::UInt64
-    # ── Mining-chain asset ticks (Ch 0-6) ─────────────────────────────────
-    dnx_price::Float32
-    dnx_vol::Float32
-    quai_price::Float32
-    quai_vol::Float32
-    qubic_price::Float32
-    qubic_vol::Float32
-    kaspa_price::Float32
-    kaspa_vol::Float32
-    monero_price::Float32
-    monero_vol::Float32
-    ocean_price::Float32
-    ocean_vol::Float32
-    verus_price::Float32
-    verus_vol::Float32
-    # ── Auxiliary / confidence signal ─────────────────────────────────────
-    confidence_signal::Float32
-    # ── Institutional sensor slots (zeroed) ───────────────────────────────
-    funding_rate::Float32           # zeroed (mining coins lack perp markets)
-    liquidation_vol::Float32        # brain_stress proxy
-    liquidity_delta::Float32        # zeroed
-    l3_order_imbalance::Float32     # zeroed
-    # ── Hardware Proprioception ────────────────────────────────────────────
-    gpu_temp_c::Float32
-    gpu_power_w::Float32
-    gpu_util_pct::Float32
-    basys_buffer_load::Float32
-    # ── dYdX v4 Key-Free Signals ────────────────────────────────────────────
-    dydx_oi_delta::Float32          # dYdX BTC-USD OI normalised delta
-    dydx_funding_rate::Float32      # dYdX BTC-USD next funding rate
-end
-
-"""
-    decode_market_pulse(buf::Vector{UInt8}) -> MarketPulse
-
-Zero-copy decode of the 120-byte packed struct from Rust.
-Uses reinterpret to cast raw bytes directly to typed values.
-Bytes [108..120] carry Qubic Global Computing Pulse fields; decoded but not
-forwarded to the reservoir (available for future lobe integration).
-"""
-function decode_market_pulse(buf::Vector{UInt8})
-    @assert length(buf) == 120 "Expected 120 bytes, got $(length(buf))"
-
-    ts = reinterpret(UInt64, buf[1:8])[1]
-    f = reinterpret(Float32, buf[9:108])  # 25 Float32 values (base market fields)
-
-    MarketPulse(
-        ts,
-        f[1],  f[2],   # dnx   (Ch 0)
-        f[3],  f[4],   # quai  (Ch 1)
-        f[5],  f[6],   # qubic (Ch 2)
-        f[7],  f[8],   # kaspa (Ch 3)
-        f[9],  f[10],  # monero (Ch 4)
-        f[11], f[12],  # ocean (Ch 5)
-        f[13], f[14],  # verus (Ch 6)
-        f[15],         # confidence_signal
-        f[16],         # funding_rate (zeroed)
-        f[17],         # liquidation_vol (brain_stress proxy)
-        f[18],         # liquidity_delta (zeroed)
-        f[19],         # l3_order_imbalance (zeroed)
-        f[20],         # gpu_temp_c
-        f[21],         # gpu_power_w
-        f[22],         # gpu_util_pct
-        f[23],         # basys_buffer_load
-        f[24],         # dydx_oi_delta
-        f[25]          # dydx_funding_rate
-    )
-end
-
-"""
-    pulse_to_input(pulse::MarketPulse) -> Vector{Float32}
-
-Convert a MarketPulse into a 14-element input vector for the reservoir.
-Layout: [dnx_price, dnx_vol, quai_price, quai_vol, qubic_price, qubic_vol,
-         kaspa_price, kaspa_vol, monero_price, monero_vol,
-         ocean_price, ocean_vol, verus_price, verus_vol]
-Canonical channel order: DNX(0), Quai(1), Qubic(2), Kaspa(3), Monero(4), Ocean(5), Verus(6)
-"""
-function pulse_to_input(pulse::MarketPulse)
-    Float32[
-        pulse.dnx_price,    pulse.dnx_vol,
-        pulse.quai_price,   pulse.quai_vol,
-        pulse.qubic_price,  pulse.qubic_vol,
-        pulse.kaspa_price,  pulse.kaspa_vol,
-        pulse.monero_price, pulse.monero_vol,
-        pulse.ocean_price,  pulse.ocean_vol,
-        pulse.verus_price,  pulse.verus_vol,
-    ]
-end
 
 """
     cpu_randn_cu(dims...) -> CuArray{Float32}
@@ -234,7 +113,7 @@ mutable struct SparseBrain
     output::CuVector{Float32}     # 16-element readout
 
     # ── Per-lobe membrane time constant ──────────────────────────────────────
-    tau_m::Float32                # τ_m in ms (Scalper=10, Day=25, Swing=50, Macro=100)
+    tau_m::Float32                # τ_m in ms
 
     # ── Rolling spike history (HIST_DEPTH × N) for deep temporal covariance ──
     history::CuMatrix{Float32}    # 1000 × 65536 on GPU
@@ -352,7 +231,7 @@ Execute one simulation timestep:
    dV_j = ((V_rest - V_j)/τ_m + Σᵢ Wᵢⱼ·Sᵢ(t) + W_in·u) dt + σ·dWₜ
 3. **Spike Detection**: V_j > V_thresh_dynamic → spike, reset to V_reset
 4. **STDP Update**: ΔWᵢⱼ = η · trace_pre_i · trace_post_j (covariance rule)
-   reflex_eta allows Scalper lobe to "flash-learn" on liquidity events
+   reflex_eta allows Fast lobe to "flash-learn" on liquidity events
 5. **Readout**: y = W_out · S (weighted spike count)
 """
 function step!(brain::SparseBrain, u::CuVector{Float32}, gpu_temp::Float32, basys_load::Float32;
@@ -438,7 +317,7 @@ function step!(brain::SparseBrain, u::CuVector{Float32}, gpu_temp::Float32, basy
 
     # STDP weight update on W_out every 10 ticks (Hebbian readout rule):
     # ΔW_out[i,j] = reflex_eta * S_out[i] * trace_pre[j]
-    # reflex_eta > ETA for Scalper lobe during liquidity events → "flash-learning"
+    # reflex_eta > ETA for Fast lobe during liquidity events → "flash-learning"
     if brain.tick_count % 10 == 0
         S_out = brain.output .> 0.0f0
         dW_out = reflex_eta .* (Float32.(S_out) * brain.trace_pre')
@@ -446,7 +325,7 @@ function step!(brain::SparseBrain, u::CuVector{Float32}, gpu_temp::Float32, basy
         clamp!(brain.W_out, -W_MAX, W_MAX)
     end
 
-    # ── 6. Readout Layer ─────────────────────────────────────────────────────
+    # ── 6. Readout Layer ──────────────────────────────────────────────────────
     brain.output .= brain.W_out * brain.S
 
     CUDA.synchronize()
@@ -519,15 +398,15 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 """
-    monte_carlo_paths!(brain::SparseBrain, current_prices::Vector{Float32}, n_paths::Int, horizon::Int)
+    monte_carlo_paths!(buf, current_prices, vol_estimates)
 
-Generate `n_paths` simulated price paths for each asset using
+Generate simulated price paths for each asset using
 Geometric Brownian Motion driven by the reservoir's learned covariance.
 
 This runs continuously in the background to keep the GPU at high utilization
 between market ticks.
 
-Uses GPU-parallel random number generation (cuRAND) for maximum throughput.
+Uses GPU-parallel random number generation for maximum throughput.
 """
 function monte_carlo_paths!(buf::CuArray{Float32,3}, current_prices::Vector{Float32}, vol_estimates::Vector{Float32})
     n_paths, horizon, n_assets = size(buf)
@@ -557,10 +436,10 @@ end
 """
     EnsembleBrain — 4 parallel SparseBrain lobes with varying time constants.
 
-    Scalper (τ_m=10ms):  Fast reaction — captures HFT micro-structure
-    Day     (τ_m=25ms):  Intraday patterns — hourly momentum
-    Swing   (τ_m=50ms):  Multi-day swings — daily regime detection
-    Macro   (τ_m=100ms): Trend following — weekly/monthly structure
+    Fast        (τ_m=10ms):  Fast reaction — captures micro-structure
+    Medium      (τ_m=25ms):  Short-term patterns — hourly momentum
+    Slow        (τ_m=50ms):  Multi-period swings — daily regime detection
+    Integrator  (τ_m=100ms): Trend following — weekly/monthly structure
 
 Aggregation: weighted sum of lobe readouts.
 """
@@ -580,7 +459,7 @@ function EnsembleBrain()
     println()
     println("╔══════════════════════════════════════════════════════════════╗")
     println("║  Ensemble Brain — 4 Lobes × 65,536 = 262,144 Neurons      ║")
-    println("║  Scalper(10ms) │ Day(25ms) │ Swing(50ms) │ Macro(100ms)   ║")
+    println("║  Fast(10ms) │ Medium(25ms) │ Slow(50ms) │ Integrator(100ms) ║")
     println("╚══════════════════════════════════════════════════════════════╝")
     println()
 
@@ -607,7 +486,7 @@ end
 
 """
     ensemble_step!(eb, u, gpu_temp, basys_load, funding_rate, liquidation_vol, liquidity_delta;
-                   dydx_oi_delta, dydx_funding_rate)
+                   reflex_eta, dydx_oi_delta, dydx_funding_rate)
 
 Step all 4 lobes independently on the same input, then aggregate readouts.
 
@@ -619,25 +498,28 @@ dYdX OI Arousal: positive OI delta signals accumulation → lowers effective
   V_thresh (heightens reservoir sensitivity to incoming signals).
 
 Reflex Gating: When |liquidity_delta| > 0.1 (significant on-chain event),
-  the Scalper lobe (index 1, τ_m=10ms) gets a 5× learning rate boost,
+  the Fast lobe (index 1, τ_m=10ms) gets a 5× learning rate boost,
   enabling "flash-learning" — rapid synaptic adaptation to liquidity shocks.
+
+Keyword `reflex_eta` (default [`ETA`](@ref)) is the base STDP rate for every lobe; the Fast lobe uses `5× reflex_eta` when reflex gating is active.
 """
 function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32},
     gpu_temp::Float32, basys_load::Float32,
     funding_rate::Float32, liquidation_vol::Float32,
     liquidity_delta::Float32;
+    reflex_eta::Float32=ETA,
     dydx_oi_delta::Float32=0.0f0,
     dydx_funding_rate::Float32=0.0f0)
-    # Reflex Gating: boost Scalper lobe STDP when on-chain liquidity shifts
-    reflex_scalper = if abs(liquidity_delta) > 0.1f0
-        ETA * 5.0f0   # 5× flash-learning rate
+    # Reflex Gating: boost Fast lobe STDP when on-chain liquidity shifts
+    reflex_fast = if abs(liquidity_delta) > 0.1f0
+        reflex_eta * 5.0f0   # 5× flash-learning rate
     else
-        ETA            # Normal learning rate
+        reflex_eta            # Normal learning rate
     end
 
     # Step all lobes with institutional inhibition signals
     for (i, lobe) in enumerate(eb.lobes)
-        eta_lobe = (i == 1) ? reflex_scalper : ETA  # Lobe 1 = Scalper
+        eta_lobe = (i == 1) ? reflex_fast : reflex_eta  # Lobe 1 = Fast
         step!(lobe, u, gpu_temp, basys_load;
             funding_rate=funding_rate,
             liquidation_vol=liquidation_vol,
@@ -647,7 +529,7 @@ function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32},
     end
 
     # Aggregate readouts: weighted sum across lobes
-    # Scalper (0.4) + Day (0.3) + Swing (0.2) + Macro (0.1) = 1.0
+    # Fast (0.4) + Medium (0.3) + Slow (0.2) + Integrator (0.1) = 1.0
     eb.agg_output .= 0.0f0
     for (i, lobe) in enumerate(eb.lobes)
         eb.agg_output .+= eb.weights[i] .* lobe.output
@@ -685,6 +567,26 @@ function ensemble_diagnostics(eb::EnsembleBrain)
     push!(lines, temp_str)
 
     return join(lines, " | ")
+end
+
+# ── step! for EnsembleBrain: same (brain, u, gpu_temp, basys_load; ...) as SparseBrain ──
+
+"""
+    step!(eb::EnsembleBrain, u, gpu_temp, basys_load; funding_rate, liquidation_vol, ...)
+
+Same positional and keyword shape as [`step!`](@ref) for [`SparseBrain`](@ref); forwards to [`ensemble_step!`](@ref).
+Keyword `liquidity_delta` (default `0`) controls fast-lobe reflex gating in the ensemble. Keyword `reflex_eta` is forwarded as the base per-lobe STDP rate (Fast lobe uses `5× reflex_eta` when gating is active).
+"""
+function step!(eb::EnsembleBrain, u::CuVector{Float32}, gpu_temp::Float32, basys_load::Float32;
+    funding_rate::Float32=0.0f0, liquidation_vol::Float32=0.0f0,
+    reflex_eta::Float32=ETA,
+    dydx_oi_delta::Float32=0.0f0,
+    dydx_funding_rate::Float32=0.0f0,
+    liquidity_delta::Float32=0.0f0)
+    ensemble_step!(eb, u, gpu_temp, basys_load, funding_rate, liquidation_vol, liquidity_delta;
+        reflex_eta=reflex_eta,
+        dydx_oi_delta=dydx_oi_delta, dydx_funding_rate=dydx_funding_rate)
+    return nothing
 end
 
 println("[brain] sparse_brain.jl loaded — EnsembleBrain (4-lobe, 262,144 neurons) ready")
