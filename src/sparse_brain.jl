@@ -566,13 +566,24 @@ function ensemble_diagnostics(eb::EnsembleBrain)
     return join(lines, " | ")
 end
 
-# ── Convenience: step! for EnsembleBrain delegates to ensemble_step! ─────────
+# ── step! for EnsembleBrain: same (brain, u, gpu_temp, basys_load; ...) as SparseBrain ──
 
 """
-    step!(eb::EnsembleBrain, args...; kwargs...)
+    step!(eb::EnsembleBrain, u, gpu_temp, basys_load; funding_rate, liquidation_vol, ...)
 
-Convenience method: `step!` on an `EnsembleBrain` delegates to `ensemble_step!`.
+Same positional and keyword shape as [`step!`](@ref) for [`SparseBrain`](@ref); forwards to [`ensemble_step!`](@ref).
+Keyword `liquidity_delta` (default `0`) controls fast-lobe reflex gating in the ensemble. Keyword `reflex_eta`
+is accepted for call compatibility but is not forwarded (per-lobe reflex is derived from `liquidity_delta` and `ETA`).
 """
-step!(eb::EnsembleBrain, args...; kwargs...) = ensemble_step!(eb, args...; kwargs...)
+function step!(eb::EnsembleBrain, u::CuVector{Float32}, gpu_temp::Float32, basys_load::Float32;
+    funding_rate::Float32=0.0f0, liquidation_vol::Float32=0.0f0,
+    reflex_eta::Float32=ETA,
+    dydx_oi_delta::Float32=0.0f0,
+    dydx_funding_rate::Float32=0.0f0,
+    liquidity_delta::Float32=0.0f0)
+    ensemble_step!(eb, u, gpu_temp, basys_load, funding_rate, liquidation_vol, liquidity_delta;
+        dydx_oi_delta=dydx_oi_delta, dydx_funding_rate=dydx_funding_rate)
+    return nothing
+end
 
 println("[brain] sparse_brain.jl loaded — EnsembleBrain (4-lobe, 262,144 neurons) ready")
