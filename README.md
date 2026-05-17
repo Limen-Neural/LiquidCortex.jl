@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/logo.png" width="220" alt="Spikenaut">
+  <img src="docs/logo.png" width="220" alt="LiquidCortex">
 </p>
 
-<h1 align="center">SpikenautLSM.jl</h1>
+<h1 align="center">LiquidCortex.jl</h1>
 <p align="center">GPU-accelerated sparse liquid state machine for neuromorphic computing</p>
 
 <p align="center">
@@ -14,8 +14,7 @@
 
 Production-grade CUDA-accelerated sparse Liquid State Machine (LSM) with
 OU-SDE membrane dynamics, multi-lobe ensemble architecture, cuSPARSE mat-vec,
-and STDP covariance learning. Bridges the gap between CPU-only academic SNN
-packages and production-scale GPU reservoirs.
+and STDP covariance learning.
 
 ## Features
 
@@ -26,35 +25,49 @@ packages and production-scale GPU reservoirs.
 - 1000-tick rolling spike history buffer (circular, on-GPU)
 - `EnsembleBrain` — multi-lobe: multiple reservoirs with different time constants
 - Hardware proprioception: global inhibition driven by external stress signals
+- `MarketPulse` — optional domain-specific input decoding for financial time-series
 
 ## Installation
 
 ```julia
 using Pkg
-Pkg.add("SpikenautLSM")
+Pkg.add("LiquidCortex")
 ```
 
 ## Quick Start
 
 ```julia
-using SpikenautLSM
+using LiquidCortex
 
-# Create a 1024-neuron sparse LSM
-brain = SparseBrain(
-    n_neurons    = 1024,
-    connectivity = 0.1,    # 10% connectivity
-    tau          = 20.0,   # ms membrane time constant
-    sigma        = 0.05    # noise amplitude
-)
+# Create a 65,536-neuron sparse LSM lobe
+brain = SparseBrain(20.0f0)  # τ_m = 20ms
 
-# Step the reservoir
-for t in 1:T
-    external_input = signal[:, t]    # N_inputs × 1
-    step!(brain, external_input)
-end
+# Or create the full 4-lobe ensemble (262,144 neurons)
+ensemble = EnsembleBrain()
 
-readout = brain.spike_history[:, end-99:end]  # last 100 ticks
+# Step the reservoir with a 14-element input vector
+u = CUDA.zeros(Float32, 14)  # or use pulse_to_input(market_pulse)
+step!(brain, u, 45.0f0, 0.3f0)  # (input, gpu_temp, buffer_load)
+
+# Read the 16-element output
+output = get_output(brain)
 ```
+
+## Public API
+
+| Type / Function | Description |
+|-----------------|-------------|
+| `SparseBrain(tau_m)` | Create a 65,536-neuron sparse reservoir lobe |
+| `EnsembleBrain()` | Create 4-lobe ensemble (262,144 neurons) |
+| `step!(brain, u, gpu_temp, basys_load; ...)` | Execute one simulation timestep |
+| `get_output(brain)` | Copy 16-element readout from GPU to CPU |
+| `get_ensemble_output(eb)` | Copy aggregated 16-element readout |
+| `compute_reservoir_covariance!(brain)` | Compute subsampled covariance matrix |
+| `diagnostics(brain)` | Return diagnostic string |
+| `ensemble_diagnostics(eb)` | Per-lobe diagnostic summary |
+| `MarketPulse` | Market data packed struct (120 bytes) |
+| `decode_market_pulse(buf)` | Zero-copy decode from byte buffer |
+| `pulse_to_input(pulse)` | Convert MarketPulse → 14-element input vector |
 
 ## OU-SDE Membrane Dynamics
 
@@ -76,20 +89,12 @@ Computed on a subsampled 8192-neuron window to avoid O(N²) blow-up.
 
 *Bi & Poo (1998); Hebb (1949)*
 
-## Extracted from Production
+## Provenance
 
 Extracted from [Eagle-Lander](https://github.com/rmems/Eagle-Lander), a private
-neuromorphic GPU supervisor for crypto mining optimization. The LSM core has been
-fully decoupled from market-data ingestion and trading execution so it works
-with any time-series application.
-
-## Part of the Spikenaut Ecosystem
-
-| Library | Purpose |
-|---------|---------|
-| [SpikenautNero.jl](https://github.com/rmems/SpikenautNero.jl) | Multi-lobe relevance scoring |
-| [SpikenautDistill.jl](https://github.com/rmems/SpikenautDistill.jl) | Training + FPGA distillation |
-| [SpikenautSignals.jl](https://github.com/rmems/SpikenautSignals.jl) | Time-series feature extraction |
+neuromorphic GPU supervisor. The LSM core has been fully decoupled from
+domain-specific ingestion and execution so it works with any time-series
+application.
 
 ## License
 

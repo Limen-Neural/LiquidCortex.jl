@@ -1,0 +1,118 @@
+name: CI (Julia)
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/*'
+  pull_request:
+    branches:
+      - '**'
+
+concurrency:
+  group: ci-julia-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Julia ${{ matrix.julia-version }} — CPU smoke tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version: ['1.10', '1.11', '1.12']
+
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+
+      - name: Cache Julia artifacts
+        uses: julia-actions/cache@v2
+
+      - name: Instantiate
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+
+      - name: Run tests
+        run: julia --project=. -e 'using Pkg; Pkg.test()'
+
+      # ── Coverage (1.12 only, keep matrix fast) ──────────────────────────
+      - name: Generate coverage
+        if: matrix.julia-version == '1.12'
+        run: |
+          julia --project=. -e '
+            using Pkg
+            Pkg.add("Coverage")
+          '
+          julia --project=. -e '
+            using Coverage
+            coverage = process_folder()
+            covered = count(c -> c > 0, coverage)
+            total = length(coverage)
+            pct = total > 0 ? round(100.0 * covered / total, digits=1) : 0.0
+            println("Coverage: $(covered)/$(total) lines = $(pct)%")
+          '
+
+      - name: Upload coverage to Codecov
+        if: matrix.julia-version == '1.12' && env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ env.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          verbose: true
+
+  # ── GPU tests run on self-hosted runner with RTX 5080 ──────────────────
+  gpu-tests:
+    name: GPU CUDA Tests (Self-hosted)
+    needs: test
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, cuda, gpu]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+
+      - name: Cache Julia artifacts
+        uses: julia-actions/cache@v2
+
+      - name: Instantiate
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+
+      - name: Run GPU tests
+        run: julia --project=. -e 'using Pkg; Pkg.test()'
+
+      - name: GPU smoke — SparseBrain constructor
+        run: |
+          julia --project=. -e '
+            using LiquidCortex
+            using CUDA
+            @assert CUDA.functional() "No CUDA GPU available"
+            brain = SparseBrain(20.0f0; name="gpu-ci")
+            @assert brain isa SparseBrain
+            println("✓ SparseBrain constructed on $(CUDA.name(CUDA.device()))")
+          '
+
+      - name: GPU smoke — EnsembleBrain constructor
+        run: |
+          julia --project=. -e '
+            using LiquidCortex
+            using CUDA
+            ensemble = EnsembleBrain()
+            @assert ensemble isa EnsembleBrain
+            println("✓ EnsembleBrain constructed — $(length(ensemble.lobes)) lobes")
+          '
