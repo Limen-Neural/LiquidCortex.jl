@@ -2,6 +2,8 @@
 #
 # Reference LSM: A simpler 2,048-neuron dense CUDA reservoir for rapid prototyping.
 # 16-channel input/output, tanh activation, hardware proprioception inhibition.
+#
+# GPU state is lazily initialized in __init__ to allow CPU-only imports.
 
 using CUDA
 using Statistics
@@ -12,27 +14,26 @@ const REF_N = 2048
 const REF_IN = 16
 const REF_OUT = 16
 
-# Lazy GPU state — initialized on first `run_lsm_step` when CUDA is functional.
-const _market_lsm_lock = ReentrantLock()
-_market_lsm_initialized = false
+# ── Lazy-initialized GPU state ─────────────────────────────────────────────────
+# These globals start as `nothing` and are allocated only when CUDA is functional.
+# This allows `using LiquidCortex` to succeed on CPU-only machines.
 
-function _ensure_market_reservoir_locked!()
-    global W, Win, Wout, x, _market_lsm_initialized
-    _market_lsm_initialized && return nothing
-    CUDA.functional() ||
-        error("run_lsm_step requires a CUDA-capable GPU (CUDA.functional() == false)")
-    W = CUDA.randn(Float32, REF_N, REF_N) .* 0.02f0
-    Win = CUDA.randn(Float32, REF_N, REF_IN) .* 0.5f0
-    Wout = CUDA.randn(Float32, REF_OUT, REF_N) .* 0.1f0
-    x = CUDA.zeros(Float32, REF_N)
-    _market_lsm_initialized = true
-    return nothing
-end
+const _ref_W = Ref{Union{Nothing, CuMatrix{Float32}}}(nothing)
+const _ref_Win = Ref{Union{Nothing, CuMatrix{Float32}}}(nothing)
+const _ref_Wout = Ref{Union{Nothing, CuMatrix{Float32}}}(nothing)
+const _ref_x = Ref{Union{Nothing, CuVector{Float32}}}(nothing)
 
-function _ensure_market_reservoir!()
-    lock(_market_lsm_lock) do
-        _ensure_market_reservoir_locked!()
-    end
+"""
+    _init_ref_lsm!()
+
+Initialize the 2,048-neuron reference LSM reservoir on GPU.
+Called from `LiquidCortex.__init__()` only when `CUDA.functional()` is true.
+"""
+function _init_ref_lsm!()
+    _ref_W[] = CUDA.randn(Float32, REF_N, REF_N) .* 0.02f0
+    _ref_Win[] = CUDA.randn(Float32, REF_N, REF_IN) .* 0.5f0
+    _ref_Wout[] = CUDA.randn(Float32, REF_OUT, REF_N) .* 0.1f0
+    _ref_x[] = CUDA.zeros(Float32, REF_N)
     return nothing
 end
 
@@ -43,8 +44,15 @@ end
 `inhibit_val`: Hardware thermal stress [0.0, 1.0]
 """
 function run_lsm_step(inputs_vec::Vector{Float32}, inhibit_val::Float32)
-    _ensure_market_reservoir!()
-    global x, W, Win, Wout
+    W = _ref_W[]
+    Win = _ref_Win[]
+    Wout = _ref_Wout[]
+    x_local = _ref_x[]
+
+    if W === nothing || Win === nothing || Wout === nothing || x_local === nothing
+        error("Reference LSM not initialized — no CUDA GPU available. " *
+              "Call LiquidCortex on a machine with a functional CUDA device.")
+    end
 
     # Move inputs to GPU
     u = cu(inputs_vec)
@@ -55,12 +63,11 @@ function run_lsm_step(inputs_vec::Vector{Float32}, inhibit_val::Float32)
     gain = 1.0f0 - (inhibit_val * 0.4f0)
 
     # Step the reservoir
-    # x = (1.0 - leak)*x + leak * tanh(...)
-    # For a liquid state machine, we can use a simpler version:
-    x = tanh.(gain .* (W * x) .+ (Win * u))
+    x_local .= tanh.(gain .* (W * x_local) .+ (Win * u))
+    _ref_x[] = x_local
 
     # Readout Layer
-    y = Wout * x
+    y = Wout * x_local
 
     return Array(y) # Return 16-element vector
 end

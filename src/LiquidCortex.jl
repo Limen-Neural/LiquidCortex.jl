@@ -14,34 +14,37 @@ Provides two LSM implementations:
 Optional market integration (`market_pulse.jl`) provides domain-specific input
 decoding for time-series applications.
 
-Both GPU implementations are conditionally loaded when a CUDA GPU is available.
-
-## Minimal Usage
-
-```julia
-using LiquidCortex
-
-brain = SparseBrain(20.0f0)       # 65,536-neuron sparse reservoir
-ensemble = EnsembleBrain()        # 4-lobe, 262,144 neurons
-```
+On CPU-only systems, the module loads cleanly — types and API functions are defined
+but GPU allocations are deferred until a CUDA device is available at runtime.
+Check `LiquidCortex._cuda_available[]` to test CUDA availability.
 """
 module LiquidCortex
 
 using CUDA
 
+# ── CUDA availability flag ────────────────────────────────────────────────
+# Checked at __init__ time. All GPU allocations are deferred until this is true.
+const _cuda_available = Ref{Bool}(false)
+
 function __init__()
-    if !CUDA.functional()
-        @warn "No CUDA-capable GPU found. LiquidCortex GPU kernels are unavailable. " *
+    if CUDA.functional()
+        _cuda_available[] = true
+        @info "LiquidCortex: CUDA functional — GPU kernels available on $(CUDA.name(CUDA.device()))."
+        # Eagerly initialize the reference LSM reservoir on the GPU
+        _init_ref_lsm!()
+    else
+        @warn "LiquidCortex: No CUDA-capable GPU found. " *
               "Core types will load, but step! and GPU operations require a CUDA device."
     end
 end
 
-# ── Core reservoir (always loaded — structs and constructors are CPU-safe) ──
+# ── Always-loaded source files (pure CPU, no CUDA allocations at load time) ──
+include("market_pulse.jl")   # MarketPulse is pure CPU, always available
+
+# ── GPU source files (structs defined at load; GPU allocations deferred to
+#    constructors/runtime, guarded by _cuda_available[]) ─────────────────────
 include("sparse_brain.jl")
 include("market_lsm.jl")
-
-# ── Optional market integration (always available, user-facing) ──
-include("market_pulse.jl")
 
 # ── Public API ───────────────────────────────────────────────────────────────
 

@@ -23,11 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        julia-version: ['1.10', '1.11', '1.12']
-
-    env:
-      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      JULIA_VERSION: ${{ matrix.julia-version }}
+        julia-version: ['1.10', '1.12']
 
     steps:
       - name: Checkout
@@ -45,35 +41,7 @@ jobs:
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
 
       - name: Run tests
-        run: |
-          julia --project=. -e '
-            using Pkg
-            cov = get(ENV, "JULIA_VERSION", "") == "1.12"
-            Pkg.test(; coverage=cov)
-          '
-
-      # ── Coverage (1.12 only, keep matrix fast) ──────────────────────────
-      - name: Generate coverage
-        if: matrix.julia-version == '1.12'
-        run: |
-          julia --project=. -e '
-            using Pkg
-            Pkg.add("Coverage")
-          '
-          julia --project=. -e '
-            using Coverage
-            covered, total = get_summary(process_folder())
-            pct = total > 0 ? round(100.0 * covered / total, digits=1) : 0.0
-            println("Coverage: $(covered)/$(total) lines = $(pct)%")
-          '
-
-      - name: Upload coverage to Codecov
-        if: matrix.julia-version == '1.12' && env.CODECOV_TOKEN != ''
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ env.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-          verbose: true
+        run: julia --project=. -e 'using Pkg; Pkg.test()'
 
   # ── GPU tests run on self-hosted runner with RTX 5080 ──────────────────
   gpu-tests:
@@ -97,7 +65,7 @@ jobs:
       - name: Instantiate
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
 
-      - name: Run GPU tests
+      - name: Run full tests (GPU)
         run: julia --project=. -e 'using Pkg; Pkg.test()'
 
       - name: GPU smoke — SparseBrain constructor

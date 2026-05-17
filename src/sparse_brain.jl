@@ -566,4 +566,13 @@ function ensemble_diagnostics(eb::EnsembleBrain)
     return join(lines, " | ")
 end
 
+# ── Convenience: step! for EnsembleBrain delegates to ensemble_step! ─────────
+
+"""
+    step!(eb::EnsembleBrain, args...; kwargs...)
+
+Convenience method: `step!` on an `EnsembleBrain` delegates to `ensemble_step!`.
+"""
+step!(eb::EnsembleBrain, args...; kwargs...) = ensemble_step!(eb, args...; kwargs...)
+
 println("[brain] sparse_brain.jl loaded — EnsembleBrain (4-lobe, 262,144 neurons) ready")
