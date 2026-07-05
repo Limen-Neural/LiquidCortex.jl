@@ -59,6 +59,10 @@ const W_MAX = 1.0f0         # Weight saturation (Float16 range)
 # Precompute Float32 scalars on the CPU so CUDA broadcasts stay monomorphic.
 const OU_NOISE_SCALE = SIGMA * sqrt(DT)
 
+# ── Inhibition parameters ───────────────────────────────────────────────────
+const INHIBITION_GAIN = 15.0f0    # mV increase per unit of inhibition
+const MAX_INHIBITION = 3.0f0       # Maximum inhibition clamp
+
 """
     cpu_randn_cu(dims...) -> CuArray{Float32}
 
@@ -220,13 +224,15 @@ Execute one simulation timestep:
 5. **Readout**: y = W_out · S (weighted spike count)
 """
 function step!(brain::SparseBrain, u::CuVector{Float32};
-    inhibition::Float32=0.0f0,
-    reflex_eta::Float32=ETA)
+    inhibition::Real=0.0f0,
+    reflex_eta::Real=ETA)
     brain.tick_count += 1
+    inhibition = Float32(inhibition)
+    reflex_eta = Float32(reflex_eta)
 
     # ── 1. Global Inhibition ─────────────────────────────────────────────────
-    inhib = clamp(inhibition, 0.0f0, 3.0f0)
-    brain.v_thresh_dynamic = V_THRESH + inhib * 15.0f0
+    inhib = clamp(inhibition, 0.0f0, MAX_INHIBITION)
+    brain.v_thresh_dynamic = V_THRESH + inhib * INHIBITION_GAIN
 
     # ── 2. OU-SDE Membrane Dynamics (per-lobe τ_m) ──────────────────────────
     # Recurrent input: I_rec = W · S (sparse mat-vec on GPU via cuSPARSE)
@@ -417,9 +423,12 @@ Keyword `reflex_eta` (default `ETA`) is the base STDP rate for every lobe;
 the Fast lobe uses `5× reflex_eta` when reflex gating is active.
 """
 function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
-    inhibition::Float32=0.0f0,
-    reflex_eta::Float32=ETA,
-    reflex_signal::Float32=0.0f0)
+    inhibition::Real=0.0f0,
+    reflex_eta::Real=ETA,
+    reflex_signal::Real=0.0f0)
+    inhibition = Float32(inhibition)
+    reflex_eta = Float32(reflex_eta)
+    reflex_signal = Float32(reflex_signal)
     # Reflex Gating: boost Fast lobe STDP when signal exceeds threshold
     reflex_fast = if abs(reflex_signal) > 0.1f0
         reflex_eta * 5.0f0   # 5× flash-learning rate
@@ -478,10 +487,10 @@ Forwards to [`ensemble_step!`](@ref).
 Keyword `reflex_signal` (default `0`) controls fast-lobe reflex gating.
 """
 function step!(eb::EnsembleBrain, u::CuVector{Float32};
-    inhibition::Float32=0.0f0,
-    reflex_eta::Float32=ETA,
-    reflex_signal::Float32=0.0f0)
-    ensemble_step!(eb, u; inhibition=inhibition, reflex_eta=reflex_eta, reflex_signal=reflex_signal)
+    inhibition::Real=0.0f0,
+    reflex_eta::Real=ETA,
+    reflex_signal::Real=0.0f0)
+    ensemble_step!(eb, u; inhibition=Float32(inhibition), reflex_eta=Float32(reflex_eta), reflex_signal=Float32(reflex_signal))
     return nothing
 end
 

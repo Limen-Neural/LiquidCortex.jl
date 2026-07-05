@@ -1,5 +1,6 @@
 using Test
 using LiquidCortex
+using CUDA
 
 @testset "LiquidCortex" begin
 
@@ -67,7 +68,7 @@ using LiquidCortex
             u = CUDA.zeros(Float32, 8)
             step!(brain, u; inhibition=0.5f0)
             @test brain.tick_count == 1
-            @test brain.v_thresh_dynamic > V_THRESH
+            @test brain.v_thresh_dynamic > LiquidCortex.V_THRESH
         end
 
         @testset "GPU: ensemble_step! with generic inhibition" begin
