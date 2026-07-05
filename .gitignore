@@ -5,3 +5,4 @@ Manifest.toml
 
 # Local environment variables (contains secrets — never commit)
 .env
+.mimocode/
