@@ -11,7 +11,7 @@ Provides two LSM implementations:
   Configurable input/output dimensions. Requires RTX-class GPU with ≥14 GB VRAM.
 
 - **Reference LSM** (`reference_lsm.jl`) — 2,048-neuron dense CUDA reservoir for
-  rapid prototyping.
+  rapid prototyping. Configurable input/output dimensions.
 
 On CPU-only systems, the module loads cleanly — types and API functions are defined
 but GPU allocations are deferred until a CUDA device is available at runtime.
