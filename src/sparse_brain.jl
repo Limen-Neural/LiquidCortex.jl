@@ -127,6 +127,9 @@ Weight initialization:
     (Breaks zero-readout deadlock — reservoir produces signals from tick 1)
 """
 function SparseBrain(tau_m::Float32; n_in::Int=14, n_out::Int=16, name::String="default")
+    n_in > 0 || throw(ArgumentError("n_in must be positive"))
+    n_out > 0 || throw(ArgumentError("n_out must be positive"))
+
     println("[brain:$name] Initializing 65,536-neuron lobe (τ_m=$(tau_m)ms, in=$(n_in), out=$(n_out))...")
 
     xavier_std_in = sqrt(2.0f0 / Float32(n_in))
@@ -222,6 +225,8 @@ Execute one simulation timestep:
 function step!(brain::SparseBrain, u::CuVector{Float32};
     inhibition::Float32=0.0f0,
     reflex_eta::Float32=ETA)
+    length(u) == brain.n_in || throw(DimensionMismatch("expected input length $(brain.n_in), got $(length(u))"))
+
     brain.tick_count += 1
 
     # ── 1. Global Inhibition ─────────────────────────────────────────────────
