@@ -29,8 +29,6 @@ function __init__()
     if CUDA.functional()
         _cuda_available[] = true
         @info "LiquidCortex: CUDA functional — GPU kernels available on $(CUDA.name(CUDA.device()))."
-        # Eagerly initialize the reference LSM reservoir on the GPU
-        _init_ref_lsm!()
     else
         @warn "LiquidCortex: No CUDA-capable GPU found. " *
               "Core types will load, but step! and GPU operations require a CUDA device."

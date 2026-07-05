@@ -52,15 +52,18 @@ end
 `inhibit_val`: Inhibition signal [0.0, 1.0]
 """
 function run_lsm_step(inputs_vec::Vector{Float32}, inhibit_val::Float32)
+    # Lazy initialization on first call
+    if _ref_W[] === nothing
+        LiquidCortex._cuda_available[] || error(
+            "Reference LSM requires a CUDA GPU. No CUDA device available.")
+        n = length(inputs_vec)
+        _init_ref_lsm!(; n_in=n, n_out=n)
+    end
+
     W = _ref_W[]
     Win = _ref_Win[]
     Wout = _ref_Wout[]
     x_local = _ref_x[]
-
-    if W === nothing || Win === nothing || Wout === nothing || x_local === nothing
-        error("Reference LSM not initialized — no CUDA GPU available. " *
-              "Call LiquidCortex on a machine with a functional CUDA device.")
-    end
 
     length(inputs_vec) == _ref_n_in[] || throw(DimensionMismatch(
         "input has length $(length(inputs_vec)), expected $(_ref_n_in[])"))
