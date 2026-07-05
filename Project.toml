@@ -1,7 +1,7 @@
 name = "LiquidCortex"
 uuid = "1f75a0df-502a-4be0-9310-97a9e2e7f166"
 version = "0.2.0"
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 
 [deps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
 # sparse_brain.jl — Ensemble 65,536-Neuron Sparse CUDA Liquid State Machine
 #
 # LiquidCortex V2 "Brain" — 4-Lobe Ensemble Architecture
@@ -9,18 +11,7 @@
 #   Sparse connectivity (1% connection probability, Float16 weights)
 #   STDP covariance learning rule
 #   Rolling 1,000-tick spike history for deep temporal covariance
-#   Global inhibition from hardware proprioception
-#
-# Hardware Target: RTX 5080 (16GB VRAM)
-# Expected VRAM usage:
-#   4 × W_sparse: 65536² × 1% × ~6 bytes/nnz   ≈ 1.0 GB
-#   4 × W_in:     65536 × 14 × 4 bytes           ≈ 15 MB
-#   4 × W_out:    16 × 65536 × 4 bytes            ≈ 17 MB
-#   4 × State vectors (V, S, traces):             ≈ 21 MB
-#   4 × History (1000 × 65536 × 4 bytes):         ≈ 1.05 GB
-#   MC buffers (65536 paths × 200 × 7):           ≈ 3.67 GB
-#   Covariance working memory (8192²):            ≈ 0.5 GB
-#   Total peak: ~12–14 GB VRAM
+#   Generic inhibition interface (caller provides stress signal)
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -34,9 +25,6 @@ using Printf
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 const N = 65_536        # Reservoir neuron count per lobe
-const N_IN = 14            # Input receptors (7 assets × 2: price_norm, volatility)
-const N_OUT = 16            # Output neurons (8 bull/bear pairs)
-const N_ASSETS = 7             # Number of input asset channels
 const CONN_PROB = 0.01          # 1% sparse connectivity → ~42M non-zero synapses
 const DT = 1.0f0         # Simulation timestep (normalized to tick interval)
 const HIST_DEPTH = 1000          # Rolling history depth (ticks) for deep temporal covariance
@@ -69,14 +57,7 @@ const TAU_TRACE = 20.0f0        # Eligibility trace decay
 const W_MAX = 1.0f0         # Weight saturation (Float16 range)
 
 # Precompute Float32 scalars on the CPU so CUDA broadcasts stay monomorphic.
-const XAVIER_STD_IN = sqrt(2.0f0 / Float32(N_IN))
-const XAVIER_STD_OUT = sqrt(2.0f0 / Float32(N))
 const OU_NOISE_SCALE = SIGMA * sqrt(DT)
-
-# ── Global Inhibition Thresholds ─────────────────────────────────────────────
-const TEMP_THRESH = 75.0f0    # °C — start increasing spike threshold
-const BUFFER_THRESH = 0.8f0     # FPGA buffer load — start increasing threshold
-const INHIB_GAIN = 15.0f0    # mV increase per unit of inhibition signal
 
 """
     cpu_randn_cu(dims...) -> CuArray{Float32}
@@ -110,7 +91,11 @@ mutable struct SparseBrain
     trace_post::CuVector{Float32} # Post-synaptic trace
 
     # ── Readout state ────────────────────────────────────────────────────────
-    output::CuVector{Float32}     # 16-element readout
+    output::CuVector{Float32}     # n_out-element readout
+
+    # ── Dimensions ───────────────────────────────────────────────────────────
+    n_in::Int                     # Input dimension
+    n_out::Int                    # Output dimension
 
     # ── Per-lobe membrane time constant ──────────────────────────────────────
     tau_m::Float32                # τ_m in ms
@@ -120,8 +105,8 @@ mutable struct SparseBrain
     hist_idx::Int64               # Current write index (circular)
     hist_full::Bool               # True once buffer wraps at least once
 
-    # ── Hardware feedback ────────────────────────────────────────────────────
-    v_thresh_dynamic::Float32     # Adaptive threshold (global inhibition)
+    # ── Adaptive threshold (global inhibition) ───────────────────────────────
+    v_thresh_dynamic::Float32
 
     # ── Diagnostics ──────────────────────────────────────────────────────────
     tick_count::Int64
@@ -130,19 +115,22 @@ mutable struct SparseBrain
 end
 
 """
-    SparseBrain(tau_m; name="default") -> SparseBrain
+    SparseBrain(tau_m; n_in=14, n_out=16, name="default") -> SparseBrain
 
 Initialize a 65,536-neuron sparse CUDA reservoir lobe.
 
 Weight initialization:
   - W_recurrent: Sparse CSC, 1% connectivity, Float16
     Spectral radius controlled via scaling: ||W|| ≈ 0.9 (echo state property)
-  - W_in: Dense Float32, Xavier initialization √(2/N_IN)
+  - W_in: Dense Float32, Xavier initialization √(2/n_in)
   - W_out: Dense Float32, Xavier/Glorot initialization √(2/N)
     (Breaks zero-readout deadlock — reservoir produces signals from tick 1)
 """
-function SparseBrain(tau_m::Float32; name::String="default")
-    println("[brain:$name] Initializing 65,536-neuron lobe (τ_m=$(tau_m)ms)...")
+function SparseBrain(tau_m::Float32; n_in::Int=14, n_out::Int=16, name::String="default")
+    println("[brain:$name] Initializing 65,536-neuron lobe (τ_m=$(tau_m)ms, in=$(n_in), out=$(n_out))...")
+
+    xavier_std_in = sqrt(2.0f0 / Float32(n_in))
+    xavier_std_out = sqrt(2.0f0 / Float32(N))
 
     # ── 1. Sparse recurrent weight matrix (Float16, 1% connectivity) ─────────
     nnz_expected = round(Int, N * N * CONN_PROB)
@@ -174,14 +162,14 @@ function SparseBrain(tau_m::Float32; name::String="default")
     W_gpu = CUDA.CUSPARSE.CuSparseMatrixCSC(W_cpu)
 
     # ── 2. Input weight matrix (Dense, Xavier init) ──────────────────────────
-    W_in = cpu_randn_cu(N, N_IN)
-    W_in .*= XAVIER_STD_IN
+    W_in = cpu_randn_cu(N, n_in)
+    W_in .*= xavier_std_in
 
     # ── 3. Output weight matrix — Xavier/Glorot (breaks zero-readout deadlock)
     # W_out ~ N(0, √(2/N)) — ensures non-trivial readout from tick 1
-    W_out = cpu_randn_cu(N_OUT, N)
-    W_out .*= XAVIER_STD_OUT
-    println("[brain:$name] W_out: Xavier/Glorot init σ=$(round(Float64(XAVIER_STD_OUT), sigdigits=4))")
+    W_out = cpu_randn_cu(n_out, N)
+    W_out .*= xavier_std_out
+    println("[brain:$name] W_out: Xavier/Glorot init σ=$(round(Float64(xavier_std_out), sigdigits=4))")
 
     # ── 4. Neuron state vectors ──────────────────────────────────────────────
     V = CUDA.fill(Float32(V_REST), N)
@@ -193,7 +181,7 @@ function SparseBrain(tau_m::Float32; name::String="default")
     trace_post = CUDA.zeros(Float32, N)
 
     # ── 6. Output ────────────────────────────────────────────────────────────
-    output = CUDA.zeros(Float32, N_OUT)
+    output = CUDA.zeros(Float32, n_out)
 
     # ── 7. Rolling spike history for deep temporal covariance (on GPU) ───────
     history = CUDA.zeros(Float32, HIST_DEPTH, N)
@@ -207,6 +195,7 @@ function SparseBrain(tau_m::Float32; name::String="default")
         V, S, refrac,
         trace_pre, trace_post,
         output,
+        n_in, n_out,
         tau_m,
         history, 1, false,
         Float32(V_THRESH),
@@ -219,56 +208,25 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 """
-    step!(brain, u, gpu_temp, basys_load; funding_rate=0, liquidation_vol=0, reflex_eta=ETA)
+    step!(brain, u; inhibition=0.0, reflex_eta=ETA)
 
 Execute one simulation timestep:
 
-1. **Global Inhibition ("Cortisol")**: Raise V_thresh from:
-   - Hardware: GPU temp > 75°C or FPGA buffer > 80%
-   - Market: CoinGlass funding_rate > 0.0005 or liquidation cascade
-   High funding = "market is tense" → fewer spikes → wait for high-confidence signal
+1. **Global Inhibition**: Caller-provided `inhibition` raises V_thresh.
 2. **OU-SDE Dynamics**: 
    dV_j = ((V_rest - V_j)/τ_m + Σᵢ Wᵢⱼ·Sᵢ(t) + W_in·u) dt + σ·dWₜ
 3. **Spike Detection**: V_j > V_thresh_dynamic → spike, reset to V_reset
 4. **STDP Update**: ΔWᵢⱼ = η · trace_pre_i · trace_post_j (covariance rule)
-   reflex_eta allows Fast lobe to "flash-learn" on liquidity events
 5. **Readout**: y = W_out · S (weighted spike count)
 """
-function step!(brain::SparseBrain, u::CuVector{Float32}, gpu_temp::Float32, basys_load::Float32;
-    funding_rate::Float32=0.0f0, liquidation_vol::Float32=0.0f0,
-    reflex_eta::Float32=ETA,
-    dydx_oi_delta::Float32=0.0f0,
-    dydx_funding_rate::Float32=0.0f0)
+function step!(brain::SparseBrain, u::CuVector{Float32};
+    inhibition::Float32=0.0f0,
+    reflex_eta::Float32=ETA)
     brain.tick_count += 1
 
-    # ── 1. Global Inhibition ("Cortisol" — Hardware + Market Stress) ─────────
-    inhib = 0.0f0
-    # Hardware inhibition
-    if gpu_temp > TEMP_THRESH
-        inhib += (gpu_temp - TEMP_THRESH) / 25.0f0
-    end
-    if basys_load > BUFFER_THRESH
-        inhib += (basys_load - BUFFER_THRESH) / 0.2f0
-    end
-    # Market inhibition: funding rate > 0.0005 (0.05%) → "market tense"
-    # Scale: 0.01% funding ≈ neutral, 0.1% funding ≈ max inhibition
-    if abs(funding_rate) > 0.0005f0
-        inhib += clamp(abs(funding_rate) / 0.001f0, 0.0f0, 1.5f0)
-    end
-    # Liquidation cascade stress: >$10M liquidations in window → inhibit
-    if liquidation_vol > 10_000_000.0f0
-        inhib += clamp(liquidation_vol / 50_000_000.0f0, 0.0f0, 1.0f0)
-    end
-    # dYdX funding tension: additive to inhibition (complements CoinGlass)
-    if abs(dydx_funding_rate) > 0.0003f0
-        inhib += clamp(abs(dydx_funding_rate) / 0.001f0, 0.0f0, 1.0f0)
-    end
-    # dYdX OI arousal: high OI accumulation → lower effective threshold (negative inhib)
-    # Models "market tension building toward inflection" → reservoir more sensitive
-    oi_arousal = clamp(dydx_oi_delta / 0.05f0, -1.0f0, 1.0f0)  # ±5% OI delta → ±1 arousal
-    inhib -= 0.5f0 * oi_arousal  # positive OI delta lowers threshold (heightens sensitivity)
-    inhib = clamp(inhib, 0.0f0, 3.0f0)
-    brain.v_thresh_dynamic = V_THRESH + inhib * INHIB_GAIN
+    # ── 1. Global Inhibition ─────────────────────────────────────────────────
+    inhib = clamp(inhibition, 0.0f0, 3.0f0)
+    brain.v_thresh_dynamic = V_THRESH + inhib * 15.0f0
 
     # ── 2. OU-SDE Membrane Dynamics (per-lobe τ_m) ──────────────────────────
     # Recurrent input: I_rec = W · S (sparse mat-vec on GPU via cuSPARSE)
@@ -317,7 +275,6 @@ function step!(brain::SparseBrain, u::CuVector{Float32}, gpu_temp::Float32, basy
 
     # STDP weight update on W_out every 10 ticks (Hebbian readout rule):
     # ΔW_out[i,j] = reflex_eta * S_out[i] * trace_pre[j]
-    # reflex_eta > ETA for Fast lobe during liquidity events → "flash-learning"
     if brain.tick_count % 10 == 0
         S_out = brain.output .> 0.0f0
         dW_out = reflex_eta .* (Float32.(S_out) * brain.trace_pre')
@@ -335,7 +292,7 @@ end
 """
     get_output(brain::SparseBrain) -> Vector{Float32}
 
-Copy the 16-element readout vector from GPU to CPU.
+Copy the readout vector from GPU to CPU.
 """
 function get_output(brain::SparseBrain)
     return Array(brain.output)
@@ -394,42 +351,6 @@ function compute_reservoir_covariance!(brain::SparseBrain)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Monte Carlo Market Simulation (Background GPU workload)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-"""
-    monte_carlo_paths!(buf, current_prices, vol_estimates)
-
-Generate simulated price paths for each asset using
-Geometric Brownian Motion driven by the reservoir's learned covariance.
-
-This runs continuously in the background to keep the GPU at high utilization
-between market ticks.
-
-Uses GPU-parallel random number generation for maximum throughput.
-"""
-function monte_carlo_paths!(buf::CuArray{Float32,3}, current_prices::Vector{Float32}, vol_estimates::Vector{Float32})
-    n_paths, horizon, n_assets = size(buf)
-    @assert length(current_prices) == n_assets "Expected $(n_assets) assets, got $(length(current_prices))"
-    @assert length(vol_estimates) == n_assets "Expected $(n_assets) vol estimates, got $(length(vol_estimates))"
-
-    # In-place GBM: write directly into pre-allocated buf (no second 8.4 GB alloc)
-    # Host-side RNG → GPU upload to bypass Blackwell CUDA.jl RNG compilation bug
-    for a in 1:n_assets
-        prev_prices = CUDA.fill(current_prices[a], n_paths)
-        for t in 1:horizon
-            shocks = cpu_randn_cu(n_paths)
-            shocks .*= vol_estimates[a]
-            prev_prices .= prev_prices .* exp.(shocks)
-            @views buf[:, t, a] .= prev_prices
-        end
-    end
-
-    CUDA.synchronize()
-    return nothing
-end
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # EnsembleBrain: 4-Lobe Parallel Architecture
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -437,25 +358,25 @@ end
     EnsembleBrain — 4 parallel SparseBrain lobes with varying time constants.
 
     Fast        (τ_m=10ms):  Fast reaction — captures micro-structure
-    Medium      (τ_m=25ms):  Short-term patterns — hourly momentum
-    Slow        (τ_m=50ms):  Multi-period swings — daily regime detection
-    Integrator  (τ_m=100ms): Trend following — weekly/monthly structure
+    Medium      (τ_m=25ms):  Short-term patterns
+    Slow        (τ_m=50ms):  Multi-period swings
+    Integrator  (τ_m=100ms): Trend following
 
 Aggregation: weighted sum of lobe readouts.
 """
 mutable struct EnsembleBrain
     lobes::Vector{SparseBrain}
     lobe_names::Vector{String}
-    agg_output::CuVector{Float32}   # Aggregated 16-element readout
+    agg_output::CuVector{Float32}   # Aggregated readout
     weights::Vector{Float32}        # Per-lobe aggregation weights
 end
 
 """
-    EnsembleBrain() -> EnsembleBrain
+    EnsembleBrain(; n_in=14, n_out=16) -> EnsembleBrain
 
 Initialize 4 parallel lobes × 65,536 neurons = 262,144 total neurons on GPU.
 """
-function EnsembleBrain()
+function EnsembleBrain(; n_in::Int=14, n_out::Int=16)
     println()
     println("╔══════════════════════════════════════════════════════════════╗")
     println("║  Ensemble Brain — 4 Lobes × 65,536 = 262,144 Neurons      ║")
@@ -466,11 +387,11 @@ function EnsembleBrain()
     lobes = SparseBrain[]
     for i in 1:N_LOBES
         println("─── Lobe $i/$(N_LOBES): $(LOBE_NAMES[i]) (τ_m=$(LOBE_TAUS[i])ms) ───")
-        push!(lobes, SparseBrain(LOBE_TAUS[i]; name=LOBE_NAMES[i]))
+        push!(lobes, SparseBrain(LOBE_TAUS[i]; n_in=n_in, n_out=n_out, name=LOBE_NAMES[i]))
         println()
     end
 
-    agg_output = CUDA.zeros(Float32, N_OUT)
+    agg_output = CUDA.zeros(Float32, n_out)
 
     CUDA.synchronize()
     free_mem = CUDA.available_memory() / 1e9
@@ -485,47 +406,31 @@ function EnsembleBrain()
 end
 
 """
-    ensemble_step!(eb, u, gpu_temp, basys_load, funding_rate, liquidation_vol, liquidity_delta;
-                   reflex_eta, dydx_oi_delta, dydx_funding_rate)
+    ensemble_step!(eb, u; inhibition=0.0, reflex_eta=ETA, reflex_signal=0.0)
 
 Step all 4 lobes independently on the same input, then aggregate readouts.
 
-Global Inhibition: funding_rate + liquidation_vol are forwarded to ALL lobes,
-  raising V_thresh when the market is "tense" (high funding = crowded longs).
-  dYdX funding rate provides additional key-free inhibition signal.
+Reflex Gating: When |reflex_signal| > 0.1, the Fast lobe (index 1, τ_m=10ms)
+  gets a 5× learning rate boost, enabling rapid synaptic adaptation.
 
-dYdX OI Arousal: positive OI delta signals accumulation → lowers effective
-  V_thresh (heightens reservoir sensitivity to incoming signals).
-
-Reflex Gating: When |liquidity_delta| > 0.1 (significant on-chain event),
-  the Fast lobe (index 1, τ_m=10ms) gets a 5× learning rate boost,
-  enabling "flash-learning" — rapid synaptic adaptation to liquidity shocks.
-
-Keyword `reflex_eta` (default [`ETA`](@ref)) is the base STDP rate for every lobe; the Fast lobe uses `5× reflex_eta` when reflex gating is active.
+Keyword `reflex_eta` (default `ETA`) is the base STDP rate for every lobe;
+the Fast lobe uses `5× reflex_eta` when reflex gating is active.
 """
-function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32},
-    gpu_temp::Float32, basys_load::Float32,
-    funding_rate::Float32, liquidation_vol::Float32,
-    liquidity_delta::Float32;
+function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
+    inhibition::Float32=0.0f0,
     reflex_eta::Float32=ETA,
-    dydx_oi_delta::Float32=0.0f0,
-    dydx_funding_rate::Float32=0.0f0)
-    # Reflex Gating: boost Fast lobe STDP when on-chain liquidity shifts
-    reflex_fast = if abs(liquidity_delta) > 0.1f0
+    reflex_signal::Float32=0.0f0)
+    # Reflex Gating: boost Fast lobe STDP when signal exceeds threshold
+    reflex_fast = if abs(reflex_signal) > 0.1f0
         reflex_eta * 5.0f0   # 5× flash-learning rate
     else
         reflex_eta            # Normal learning rate
     end
 
-    # Step all lobes with institutional inhibition signals
+    # Step all lobes with generic inhibition
     for (i, lobe) in enumerate(eb.lobes)
         eta_lobe = (i == 1) ? reflex_fast : reflex_eta  # Lobe 1 = Fast
-        step!(lobe, u, gpu_temp, basys_load;
-            funding_rate=funding_rate,
-            liquidation_vol=liquidation_vol,
-            reflex_eta=eta_lobe,
-            dydx_oi_delta=dydx_oi_delta,
-            dydx_funding_rate=dydx_funding_rate)
+        step!(lobe, u; inhibition=inhibition, reflex_eta=eta_lobe)
     end
 
     # Aggregate readouts: weighted sum across lobes
@@ -542,7 +447,7 @@ end
 """
     get_ensemble_output(eb) -> Vector{Float32}
 
-Copy the 16-element aggregated readout vector from GPU to CPU.
+Copy the aggregated readout vector from GPU to CPU.
 """
 function get_ensemble_output(eb::EnsembleBrain)
     return Array(eb.agg_output)
@@ -561,31 +466,22 @@ function ensemble_diagnostics(eb::EnsembleBrain)
         push!(lines, @sprintf("[%s:τ=%d] tick=%d rate=%.2f%% W=%.4f",
             eb.lobe_names[i], Int(lobe.tau_m), lobe.tick_count, rate_pct, w_norm))
     end
-
-    # Add GPU Temp to the ensemble line
-    temp_str = @sprintf("Temp: %.1f°C", eb.lobes[1].v_thresh_dynamic > 0 ? (eb.lobes[1].v_thresh_dynamic - V_THRESH) / INHIB_GAIN * 1.0 + 40.0 : 40.0)
-    push!(lines, temp_str)
-
     return join(lines, " | ")
 end
 
-# ── step! for EnsembleBrain: same (brain, u, gpu_temp, basys_load; ...) as SparseBrain ──
+# ── step! for EnsembleBrain ──
 
 """
-    step!(eb::EnsembleBrain, u, gpu_temp, basys_load; funding_rate, liquidation_vol, ...)
+    step!(eb::EnsembleBrain, u; inhibition=0.0, reflex_eta=ETA, reflex_signal=0.0)
 
-Same positional and keyword shape as [`step!`](@ref) for [`SparseBrain`](@ref); forwards to [`ensemble_step!`](@ref).
-Keyword `liquidity_delta` (default `0`) controls fast-lobe reflex gating in the ensemble. Keyword `reflex_eta` is forwarded as the base per-lobe STDP rate (Fast lobe uses `5× reflex_eta` when gating is active).
+Forwards to [`ensemble_step!`](@ref).
+Keyword `reflex_signal` (default `0`) controls fast-lobe reflex gating.
 """
-function step!(eb::EnsembleBrain, u::CuVector{Float32}, gpu_temp::Float32, basys_load::Float32;
-    funding_rate::Float32=0.0f0, liquidation_vol::Float32=0.0f0,
+function step!(eb::EnsembleBrain, u::CuVector{Float32};
+    inhibition::Float32=0.0f0,
     reflex_eta::Float32=ETA,
-    dydx_oi_delta::Float32=0.0f0,
-    dydx_funding_rate::Float32=0.0f0,
-    liquidity_delta::Float32=0.0f0)
-    ensemble_step!(eb, u, gpu_temp, basys_load, funding_rate, liquidation_vol, liquidity_delta;
-        reflex_eta=reflex_eta,
-        dydx_oi_delta=dydx_oi_delta, dydx_funding_rate=dydx_funding_rate)
+    reflex_signal::Float32=0.0f0)
+    ensemble_step!(eb, u; inhibition=inhibition, reflex_eta=reflex_eta, reflex_signal=reflex_signal)
     return nothing
 end
 

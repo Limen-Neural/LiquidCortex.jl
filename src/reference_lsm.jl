@@ -1,7 +1,9 @@
-# market_lsm.jl - Liquid State Machine (LSM) Reservoir (2,048 Neurons)
+# SPDX-License-Identifier: MIT OR Apache-2.0
 #
-# Reference LSM: A simpler 2,048-neuron dense CUDA reservoir for rapid prototyping.
-# 16-channel input/output, tanh activation, hardware proprioception inhibition.
+# reference_lsm.jl — Reference Liquid State Machine (2,048 Neurons)
+#
+# A simple 2,048-neuron dense CUDA reservoir for rapid prototyping.
+# 16-channel input/output, tanh activation, generic inhibition.
 #
 # GPU state is lazily initialized in __init__ to allow CPU-only imports.
 
@@ -40,8 +42,8 @@ end
 """
     run_lsm_step(inputs_vec, inhibit_val)
 
-`inputs_vec`: 16-element Float32 vector (receptor stimulus)
-`inhibit_val`: Hardware thermal stress [0.0, 1.0]
+    `inputs_vec`: 16-element Float32 vector (input stimulus)
+`inhibit_val`: Inhibition signal [0.0, 1.0]
 """
 function run_lsm_step(inputs_vec::Vector{Float32}, inhibit_val::Float32)
     W = _ref_W[]
@@ -58,7 +60,6 @@ function run_lsm_step(inputs_vec::Vector{Float32}, inhibit_val::Float32)
     u = cu(inputs_vec)
 
     # Reservoir dynamics: x(t+1) = tanh(W*x(t) + Win*u(t))
-    # Hardware Sync: Proprioception (Temp/Watts) acts as "Inhibitory Signal"
     # High inhibit_val reduces the gain of the recurrent connections.
     gain = 1.0f0 - (inhibit_val * 0.4f0)
 
