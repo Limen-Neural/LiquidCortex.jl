@@ -26,6 +26,7 @@ const _ref_Wout = Ref{Union{Nothing, CuMatrix{Float32}}}(nothing)
 const _ref_x = Ref{Union{Nothing, CuVector{Float32}}}(nothing)
 const _ref_n_in = Ref{Int}(REF_IN_DEFAULT)
 const _ref_n_out = Ref{Int}(REF_OUT_DEFAULT)
+const _ref_initialized = Ref{Bool}(false)
 
 """
     _init_ref_lsm!(; n_in=16, n_out=16)
@@ -36,14 +37,17 @@ Called lazily on first `run_lsm_step` invocation, or manually for custom dimensi
 function _init_ref_lsm!(; n_in::Int=REF_IN_DEFAULT, n_out::Int=REF_OUT_DEFAULT)
     n_in > 0 || throw(ArgumentError("n_in must be positive, got $n_in"))
     n_out > 0 || throw(ArgumentError("n_out must be positive, got $n_out"))
-    _ref_W[] = CUDA.randn(Float32, REF_N, REF_N) .* 0.02f0
-    _ref_Win[] = CUDA.randn(Float32, REF_N, n_in) .* 0.5f0
-    _ref_Wout[] = CUDA.randn(Float32, n_out, REF_N) .* 0.1f0
+    _ref_W[] = cpu_randn_cu(REF_N, REF_N) .* 0.02f0
+    _ref_Win[] = cpu_randn_cu(REF_N, n_in) .* 0.5f0
+    _ref_Wout[] = cpu_randn_cu(n_out, REF_N) .* 0.1f0
     _ref_x[] = CUDA.zeros(Float32, REF_N)
     _ref_n_in[] = n_in
     _ref_n_out[] = n_out
+    _ref_initialized[] = true
     return nothing
 end
+
+_ref_is_initialized() = _ref_initialized[]
 
 """
     run_lsm_step(inputs_vec, inhibit_val; n_out=16)
@@ -55,7 +59,7 @@ end
 function run_lsm_step(inputs_vec::Vector{Float32}, inhibit_val::Float32;
     n_out::Int=REF_OUT_DEFAULT)
     # Lazy initialization on first call
-    if _ref_W[] === nothing
+    if !_ref_is_initialized()
         LiquidCortex._cuda_available[] || error(
             "Reference LSM requires a CUDA GPU. No CUDA device available.")
         _init_ref_lsm!(; n_in=length(inputs_vec), n_out=n_out)
