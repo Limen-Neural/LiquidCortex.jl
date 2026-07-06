@@ -1,18 +1,13 @@
 ---
 # Codacy configuration for LiquidCortex.jl
 
-# Markdownlint rules
 engines:
   markdownlint:
     enabled: true
     config:
-      # Allow inline HTML — README uses <p align>, <img>, <h1> for badges/layout
+      # Markdown is pure — no inline HTML used
       MD033:
         enabled: false
-      # First line is badges, not a heading
+      # First line is the title heading, badges follow
       MD041:
         enabled: false
-
-# Exclude non-source paths
-exclude_paths:
-  - .mimocode/**
