@@ -40,25 +40,8 @@ jobs:
       - name: Instantiate
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
 
-      - name: Run tests with coverage
-        run: julia --project=. -e 'using Pkg; Pkg.test(; coverage=true)'
-
-      - name: Generate coverage report
-        run: julia --project=. -e '
-          using Coverage;
-          cov = process_folder();
-          LCOV.writefile("lcov.info", cov);
-          println("Coverage: $(get_summary(cov))%")'
-
-      - name: Upload coverage to Codecov
-        if: matrix.julia-version == '1.11'
-        uses: codecov/codecov-action@v5
-        with:
-          files: lcov.info
-          flags: Julia${{ matrix.julia-version }}
-          name: Julia ${{ matrix.julia-version }}
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+      - name: Run tests
+        run: julia --project=. -e 'using Pkg; Pkg.test()'
 
       - name: Run doctests (if any)
         run: julia --project=. -e 'using Pkg; Pkg.test(; test_args=["doctest"])'
