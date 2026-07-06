@@ -57,7 +57,8 @@ function run_lsm_step(inputs_vec::Vector{Float32}, inhibit_val::Float32)
         LiquidCortex._cuda_available[] || error(
             "Reference LSM requires a CUDA GPU. No CUDA device available.")
         n = length(inputs_vec)
-        _init_ref_lsm!(; n_in=n, n_out=n)
+        _init_ref_lsm!(; n_in=n, n_out=REF_OUT_DEFAULT)
+
     end
 
     W = _ref_W[]
