@@ -8,6 +8,9 @@
 <p align="center">
   <img src="https://img.shields.io/badge/language-Julia-9558B2" alt="Julia">
   <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="MIT/Apache-2.0">
+  <a href="https://codecov.io/gh/Limen-Neural/LiquidCortex.jl">
+    <img src="https://codecov.io/gh/Limen-Neural/LiquidCortex.jl/branch/main/graph/badge.svg" alt="Coverage">
+  </a>
 </p>
 
 ---
