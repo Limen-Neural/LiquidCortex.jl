@@ -1,15 +1,10 @@
-<p align="center">
-  <img src="docs/logo.png" width="220" alt="LiquidCortex">
-</p>
+# LiquidCortex.jl
 
-<h1 align="center">LiquidCortex.jl</h1>
-<p align="center">GPU-accelerated sparse liquid state machine for neuromorphic computing</p>
+GPU-accelerated sparse liquid state machine for neuromorphic computing
 
-<p align="center">
-  <img src="https://img.shields.io/badge/language-Julia-9558B2" alt="Julia">
-  <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="MIT/Apache-2.0">
-  <img src="https://codecov.io/gh/Limen-Neural/LiquidCortex.jl/branch/main/graph/badge.svg" alt="Coverage">
-</p>
+![Julia](https://img.shields.io/badge/language-Julia-9558B2)
+![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
+![Coverage](https://codecov.io/gh/Limen-Neural/LiquidCortex.jl/branch/main/graph/badge.svg)
 
 ---
 
