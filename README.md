@@ -1,3 +1,5 @@
+![LiquidCortex](docs/logo.png)
+
 # LiquidCortex.jl
 
 GPU-accelerated sparse liquid state machine for neuromorphic computing
