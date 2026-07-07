@@ -13,5 +13,9 @@ updates:
       - "ci"
     commit-message:
       prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     reviewers:
       - "rmems"
