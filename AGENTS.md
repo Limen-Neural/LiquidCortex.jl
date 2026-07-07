@@ -1,0 +1,42 @@
+# AGENTS.md
+
+## Project Overview
+
+LiquidCortex.jl — GPU-accelerated sparse Liquid State Machine (LSM) for neuromorphic computing.
+Julia package with CUDA acceleration, cuSPARSE Float16, STDP covariance learning.
+
+## Setup Commands
+
+- Install: `julia --project -e 'using Pkg; Pkg.instantiate()'`
+- Run tests: `julia --project -e 'using Pkg; Pkg.test()'`
+- Test with coverage: `julia --project -e 'using Pkg; Pkg.test(; coverage=true)'`
+
+## Architecture
+
+- `src/LiquidCortex.jl` — Module definition, exports, `__init__`
+- `src/sparse_brain.jl` — SparseBrain (65k neurons/lobe), EnsembleBrain (4 lobes), `step!()`, STDP
+- `src/reference_lsm.jl` — 2,048-neuron reference reservoir (lazy-init, configurable dims)
+- `test/runtests.jl` — Test suite (CPU + GPU tests gated by `_cuda_available`)
+
+## Code Style
+
+- Julia standard formatting
+- No domain-specific code in core (market/mining removed in PR #12)
+- Generic inhibition interface: `step!(brain::SparseBrain, u::CuVector{Float32}; inhibition::Real=0.0, reflex_eta::Real=ETA)`
+- Configurable dimensions: `SparseBrain(tau_m::Float32; n_in::Int=14, n_out::Int=16, name::String="default")`
+
+## Testing
+
+- CPU tests always run (package load, API exports, config validation)
+- GPU tests gated by `LiquidCortex._cuda_available[]`
+- All 3 Julia versions tested: 1.10, 1.11, 1.12
+
+## PR Instructions
+
+- Branch naming: `feature/`, `fix/`, `ci/`, `refactor/`, `docs/`
+- Run tests before pushing
+- All CI checks must pass (Julia 1.10/1.11/1.12, Codacy, CodeRabbit)
+- Address all bot review threads before merge
+- Pin GitHub Actions to full commit SHAs (not tags)
+- Use `julia-actions/julia-processcoverage` for coverage — not Coverage.jl in Project.toml
+- README must use pure markdown — no HTML elements (Codacy lints `<a>` and `<img>`)

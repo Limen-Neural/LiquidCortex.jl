@@ -1,6 +1,11 @@
 ---
 # Codacy configuration for LiquidCortex.jl
 
+# Exclude agent guidance files (not source code)
+exclude_paths:
+  - AGENTS.md
+  - REVIEW.md
+
 engines:
   markdownlint:
     enabled: true
