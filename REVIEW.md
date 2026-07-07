@@ -12,7 +12,7 @@
 ### Testing
 
 - [ ] New code has corresponding tests
-- [ ] GPU tests properly gated by `_cuda_available[]`
+- [ ] GPU tests properly gated by `LiquidCortex._cuda_available[]`
 - [ ] No hardcoded dimensions — use configurable `n_in`/`n_out`
 
 ### CI/CD

@@ -22,8 +22,8 @@ Julia package with CUDA acceleration, cuSPARSE Float16, STDP covariance learning
 
 - Julia standard formatting
 - No domain-specific code in core (market/mining removed in PR #12)
-- Generic inhibition interface: `step!(brain, u; inhibition=0.0, reflex_eta=ETA)`
-- Configurable dimensions: `SparseBrain(tau_m; n_in=14, n_out=16)`
+- Generic inhibition interface: `step!(brain::SparseBrain, u::CuVector{Float32}; inhibition::Real=0.0, reflex_eta::Real=ETA)`
+- Configurable dimensions: `SparseBrain(tau_m::Float32; n_in::Int=14, n_out::Int=16, name::String="default")`
 
 ## Testing
 
