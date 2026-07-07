@@ -1,4 +1,4 @@
-![LiquidCortex](docs/logo.png)
+<img src="docs/logo.png" width="120" alt="LiquidCortex">
 
 # LiquidCortex.jl
 

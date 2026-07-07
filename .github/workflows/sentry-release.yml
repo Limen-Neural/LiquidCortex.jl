@@ -69,7 +69,6 @@ jobs:
           sentry-cli --version
 
       - name: Create Sentry Release
-        continue-on-error: true
         if: ${{ env.SENTRY_AUTH_TOKEN != '' }}
         run: |
           VERSION="liquidcortex@$(git rev-parse --short HEAD)"
