@@ -16,9 +16,6 @@ permissions:
 jobs:
   sentry-release:
     name: Create Sentry Release
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push'
     runs-on: ubuntu-latest
     env:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -38,7 +35,7 @@ jobs:
         if: ${{ env.SENTRY_AUTH_TOKEN != '' }}
         with:
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Load .env (local override)
         if: ${{ env.SENTRY_AUTH_TOKEN != '' }}
