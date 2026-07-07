@@ -26,15 +26,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Julia
-        uses: julia-actions/setup-julia@4c0cb0fce8556fdb04a90347310e5db8b1f98fb9 # v2
+        uses: julia-actions/setup-julia@fa02766e078afaaf09b14210362cee14137e6a32 # v3.0.2
         with:
           version: ${{ matrix.julia-version }}
 
       - name: Cache Julia artifacts
-        uses: julia-actions/cache@d10a6fd8f31b12404a54613ebad242900567f2b9 # v2
+        uses: julia-actions/cache@a45e8fa8be21c18a06b7177052533149e61e9b38 # v3.1.0
 
       - name: Instantiate
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
@@ -48,7 +48,7 @@ jobs:
           directories: src
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@04b047e8bb82a0c002c8312c1c880fbc6a999d45 # v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
         with:
           files: lcov.info
           flags: julia
