@@ -20,6 +20,7 @@ Check `LiquidCortex._cuda_available[]` to test CUDA availability.
 module LiquidCortex
 
 using CUDA
+using Sentry
 
 # ── CUDA availability flag ────────────────────────────────────────────────
 # Checked at __init__ time. All GPU allocations are deferred until this is true.
@@ -32,6 +33,15 @@ function __init__()
     else
         @warn "LiquidCortex: No CUDA-capable GPU found. " *
               "Core types will load, but step! and GPU operations require a CUDA device."
+    end
+
+    # Initialize Sentry error capture if DSN is configured
+    dsn = get(ENV, "SENTRY_DSN", "")
+    if !isempty(dsn)
+        Sentry.init(dsn)
+        Sentry.set_tag("package", "LiquidCortex.jl")
+        Sentry.set_tag("julia_version", string(VERSION))
+        @info "LiquidCortex: Sentry error capture enabled."
     end
 end
 
