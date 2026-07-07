@@ -19,6 +19,8 @@ jobs:
       SENTRY_ORG: limen-neural
       SENTRY_PROJECT: liquidcortex
       SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      # Capture timestamp once for create + cleanup to use the same version
+      TEST_VERSION: "test-${{ github.run_id }}@${{ github.sha }}"
 
     steps:
       - name: Check Sentry configuration
@@ -55,16 +57,14 @@ jobs:
 
       - name: Send test release
         run: |
-          VERSION="test-$(date +%Y%m%d%H%M%S)@$(git rev-parse --short HEAD)"
-          echo "Creating test release: $VERSION"
-          sentry-cli releases new "$VERSION"
-          sentry-cli releases set-commits --auto "$VERSION"
-          sentry-cli releases finalize "$VERSION"
-          echo "✓ Sentry release created: $VERSION"
+          echo "Creating test release: ${TEST_VERSION}"
+          sentry-cli releases new "${TEST_VERSION}"
+          sentry-cli releases set-commits --auto "${TEST_VERSION}"
+          sentry-cli releases finalize "${TEST_VERSION}"
+          echo "✓ Sentry release created: ${TEST_VERSION}"
 
       - name: Cleanup test release
         if: always()
         run: |
-          VERSION="test-$(date +%Y%m%d%H%M%S)@$(git rev-parse --short HEAD)"
-          sentry-cli releases delete "$VERSION" 2>/dev/null || true
-          echo "Cleaned up test release"
+          sentry-cli releases delete "${TEST_VERSION}" 2>/dev/null || true
+          echo "Cleaned up test release: ${TEST_VERSION}"

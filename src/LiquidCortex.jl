@@ -38,10 +38,14 @@ function __init__()
     # Initialize Sentry error capture if DSN is configured
     dsn = get(ENV, "SENTRY_DSN", "")
     if !isempty(dsn)
-        Sentry.init(dsn)
-        Sentry.set_tag("package", "LiquidCortex.jl")
-        Sentry.set_tag("julia_version", string(VERSION))
-        @info "LiquidCortex: Sentry error capture enabled."
+        try
+            Sentry.init(dsn)
+            Sentry.set_tag("package", "LiquidCortex.jl")
+            Sentry.set_tag("julia_version", string(VERSION))
+            @info "LiquidCortex: Sentry error capture enabled."
+        catch e
+            @warn "LiquidCortex: Failed to initialize Sentry" exception=e
+        end
     end
 end
 
