@@ -1,0 +1,70 @@
+name: Sentry
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: sentry-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify Sentry connection
+    runs-on: ubuntu-latest
+    env:
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: limen-neural
+      SENTRY_PROJECT: liquidcortex
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      # Capture timestamp once for create + cleanup to use the same version
+      TEST_VERSION: "test-${{ github.run_id }}@${{ github.sha }}"
+
+    steps:
+      - name: Check Sentry configuration
+        if: ${{ env.SENTRY_AUTH_TOKEN == '' || env.SENTRY_DSN == '' }}
+        run: |
+          echo "⚠ Missing secrets. Required:"
+          echo "  - SENTRY_AUTH_TOKEN: ${{ env.SENTRY_AUTH_TOKEN == '' && 'MISSING' || 'set' }}"
+          echo "  - SENTRY_DSN: ${{ env.SENTRY_DSN == '' && 'MISSING' || 'set' }}"
+          echo "Add them to GitHub repo secrets."
+          exit 1
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install pinned sentry-cli
+        env:
+          SENTRY_CLI_VERSION: "3.4.0"
+        run: |
+          set -euo pipefail
+          asset_name="sentry-cli-Linux-x86_64"
+          asset_url="https://downloads.sentry-cdn.com/sentry-cli/${SENTRY_CLI_VERSION}/${asset_name}"
+          expected_sha256="803556dd09de4fe54639c4d2e696315fd5a67dda3f8fe8dfe52a942ead5a2ae1"
+          curl -fsSL "$asset_url" -o sentry-cli
+          echo "${expected_sha256}  sentry-cli" | sha256sum -c -
+          chmod +x sentry-cli
+          sudo mv sentry-cli /usr/local/bin/sentry-cli
+          sentry-cli --version
+
+      - name: Verify project exists
+        run: |
+          echo "Verifying Sentry project: ${SENTRY_PROJECT}"
+          sentry-cli releases list -p "${SENTRY_PROJECT}" --limit 1 2>&1 | head -5
+
+      - name: Send test release
+        run: |
+          echo "Creating test release: ${TEST_VERSION}"
+          sentry-cli releases new "${TEST_VERSION}"
+          sentry-cli releases set-commits --auto "${TEST_VERSION}"
+          sentry-cli releases finalize "${TEST_VERSION}"
+          echo "✓ Sentry release created: ${TEST_VERSION}"
+
+      - name: Cleanup test release
+        if: always()
+        run: |
+          sentry-cli releases delete "${TEST_VERSION}" 2>/dev/null || true
+          echo "Cleaned up test release: ${TEST_VERSION}"
