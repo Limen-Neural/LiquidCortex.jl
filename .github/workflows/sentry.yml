@@ -53,7 +53,7 @@ jobs:
       - name: Verify project exists
         run: |
           echo "Verifying Sentry project: ${SENTRY_PROJECT}"
-          sentry-cli info 2>&1 | head -20
+          sentry-cli releases list -p "${SENTRY_PROJECT}" --limit 1 2>&1 | head -5
 
       - name: Send test release
         run: |

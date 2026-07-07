@@ -44,7 +44,7 @@ function __init__()
             Sentry.set_tag("julia_version", string(VERSION))
             @info "LiquidCortex: Sentry error capture enabled."
         catch e
-            @warn "LiquidCortex: Failed to initialize Sentry" exception=e
+            @warn "LiquidCortex: Failed to initialize Sentry" exception=(e, catch_backtrace())
         end
     end
 end
