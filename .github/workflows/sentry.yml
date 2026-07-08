@@ -1,10 +1,13 @@
-name: Sentry
+name: Sentry Preflight
 
 on:
+  pull_request:
+    branches:
+      - '**'
   workflow_dispatch:
 
 concurrency:
-  group: sentry-${{ github.ref_name }}
+  group: sentry-preflight-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
@@ -12,29 +15,25 @@ permissions:
 
 jobs:
   verify:
-    name: Verify Sentry connection
+    name: Verify Sentry configuration
     runs-on: ubuntu-latest
     env:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       SENTRY_ORG: limen-neural
       SENTRY_PROJECT: liquidcortex
-      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-      # Capture timestamp once for create + cleanup to use the same version
-      TEST_VERSION: "test-${{ github.run_id }}@${{ github.sha }}"
 
     steps:
       - name: Check Sentry configuration
-        if: ${{ env.SENTRY_AUTH_TOKEN == '' || env.SENTRY_DSN == '' }}
+        if: ${{ env.SENTRY_AUTH_TOKEN == '' }}
         run: |
-          echo "⚠ Missing secrets. Required:"
-          echo "  - SENTRY_AUTH_TOKEN: ${{ env.SENTRY_AUTH_TOKEN == '' && 'MISSING' || 'set' }}"
-          echo "  - SENTRY_DSN: ${{ env.SENTRY_DSN == '' && 'MISSING' || 'set' }}"
-          echo "Add them to GitHub repo secrets."
+          echo "⚠ Missing required secret: SENTRY_AUTH_TOKEN"
+          echo "Add SENTRY_AUTH_TOKEN to the GitHub Actions secrets for this repository."
           exit 1
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Install pinned sentry-cli
         env:
@@ -50,21 +49,12 @@ jobs:
           sudo mv sentry-cli /usr/local/bin/sentry-cli
           sentry-cli --version
 
-      - name: Verify project exists
+      - name: Verify Sentry authentication
         run: |
-          echo "Verifying Sentry project: ${SENTRY_PROJECT}"
+          echo "Verifying Sentry authentication for org: ${SENTRY_ORG}"
+          sentry-cli info
+
+      - name: Verify Sentry project exists
+        run: |
+          echo "Verifying Sentry project: ${SENTRY_ORG}/${SENTRY_PROJECT}"
           sentry-cli releases list -p "${SENTRY_PROJECT}" --limit 1 2>&1 | head -5
-
-      - name: Send test release
-        run: |
-          echo "Creating test release: ${TEST_VERSION}"
-          sentry-cli releases new "${TEST_VERSION}"
-          sentry-cli releases set-commits --auto "${TEST_VERSION}"
-          sentry-cli releases finalize "${TEST_VERSION}"
-          echo "✓ Sentry release created: ${TEST_VERSION}"
-
-      - name: Cleanup test release
-        if: always()
-        run: |
-          sentry-cli releases delete "${TEST_VERSION}" 2>/dev/null || true
-          echo "Cleaned up test release: ${TEST_VERSION}"
