@@ -225,7 +225,7 @@ Execute one simulation timestep:
 4. **STDP Update**: ΔWᵢⱼ = η · trace_pre_i · trace_post_j (covariance rule)
 5. **Readout**: y = W_out · S (weighted spike count)
 """
-function step!(brain::SparseBrain, u::CuVector{Float32};
+function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
     reflex_eta::Real=ETA)
     length(u) == brain.n_in || throw(DimensionMismatch("input has length $(length(u)), expected $(brain.n_in)"))
@@ -296,6 +296,17 @@ function step!(brain::SparseBrain, u::CuVector{Float32};
 
     CUDA.synchronize()
     return nothing
+end
+
+function step!(brain::SparseBrain, u::CuVector{Float32};
+    inhibition::Real=0.0f0,
+    reflex_eta::Real=ETA)
+    try
+        _step_impl!(brain, u; inhibition=inhibition, reflex_eta=reflex_eta)
+    catch exc
+        _capture_runtime_exception(exc, catch_backtrace())
+        rethrow()
+    end
 end
 
 """
@@ -425,7 +436,7 @@ Reflex Gating: When |reflex_signal| > 0.1, the Fast lobe (index 1, τ_m=10ms)
 Keyword `reflex_eta` (default `ETA`) is the base STDP rate for every lobe;
 the Fast lobe uses `5× reflex_eta` when reflex gating is active.
 """
-function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
+function _ensemble_step_impl!(eb::EnsembleBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
     reflex_eta::Real=ETA,
     reflex_signal::Real=0.0f0)
@@ -442,7 +453,7 @@ function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
     # Step all lobes with generic inhibition
     for (i, lobe) in enumerate(eb.lobes)
         eta_lobe = (i == 1) ? reflex_fast : reflex_eta  # Lobe 1 = Fast
-        step!(lobe, u; inhibition=inhibition, reflex_eta=eta_lobe)
+        _step_impl!(lobe, u; inhibition=inhibition, reflex_eta=eta_lobe)
     end
 
     # Aggregate readouts: weighted sum across lobes
@@ -454,6 +465,21 @@ function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
 
     CUDA.synchronize()
     return nothing
+end
+
+function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
+    inhibition::Real=0.0f0,
+    reflex_eta::Real=ETA,
+    reflex_signal::Real=0.0f0)
+    try
+        _ensemble_step_impl!(eb, u;
+            inhibition=inhibition,
+            reflex_eta=reflex_eta,
+            reflex_signal=reflex_signal)
+    catch exc
+        _capture_runtime_exception(exc, catch_backtrace())
+        rethrow()
+    end
 end
 
 """

@@ -25,8 +25,12 @@ using Sentry
 # ── CUDA availability flag ────────────────────────────────────────────────
 # Checked at __init__ time. All GPU allocations are deferred until this is true.
 const _cuda_available = Ref{Bool}(false)
+const _sentry_enabled = Ref{Bool}(false)
 
 function __init__()
+    _cuda_available[] = false
+    _sentry_enabled[] = false
+
     if CUDA.functional()
         _cuda_available[] = true
         @info "LiquidCortex: CUDA functional — GPU kernels available on $(CUDA.name(CUDA.device()))."
@@ -39,14 +43,27 @@ function __init__()
     dsn = get(ENV, "SENTRY_DSN", "")
     if !isempty(dsn)
         try
-            Sentry.init(dsn)
+            version = string(Base.pkgversion(@__MODULE__))
+            Sentry.init(dsn; release="LiquidCortex.jl@$version")
             Sentry.set_tag("package", "LiquidCortex.jl")
+            Sentry.set_tag("version", version)
             Sentry.set_tag("julia_version", string(VERSION))
+            _sentry_enabled[] = true
             @info "LiquidCortex: Sentry error capture enabled."
         catch e
             @warn "LiquidCortex: Failed to initialize Sentry" exception=(e, catch_backtrace())
         end
     end
+end
+
+@noinline function _capture_runtime_exception(exc::Exception, bt)
+    _sentry_enabled[] || return nothing
+    try
+        Sentry.capture_exception([(exc, bt)])
+    catch sentry_error
+        @warn "LiquidCortex: Failed to capture exception in Sentry" exception=(sentry_error, catch_backtrace())
+    end
+    return nothing
 end
 
 # ── GPU source files (structs defined at load; GPU allocations deferred to
