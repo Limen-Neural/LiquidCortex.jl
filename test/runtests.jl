@@ -2,6 +2,40 @@ using Test
 using LiquidCortex
 using CUDA
 
+function snapshot_reference_lsm_state()
+    return (
+        W=LiquidCortex._ref_W[],
+        Win=LiquidCortex._ref_Win[],
+        Wout=LiquidCortex._ref_Wout[],
+        x=LiquidCortex._ref_x[],
+        n_in=LiquidCortex._ref_n_in[],
+        n_out=LiquidCortex._ref_n_out[],
+        initialized=LiquidCortex._ref_initialized[],
+    )
+end
+
+function clear_reference_lsm_state!()
+    LiquidCortex._ref_W[] = nothing
+    LiquidCortex._ref_Win[] = nothing
+    LiquidCortex._ref_Wout[] = nothing
+    LiquidCortex._ref_x[] = nothing
+    LiquidCortex._ref_n_in[] = LiquidCortex.REF_IN_DEFAULT
+    LiquidCortex._ref_n_out[] = LiquidCortex.REF_OUT_DEFAULT
+    LiquidCortex._ref_initialized[] = false
+    return nothing
+end
+
+function restore_reference_lsm_state!(state)
+    LiquidCortex._ref_W[] = state.W
+    LiquidCortex._ref_Win[] = state.Win
+    LiquidCortex._ref_Wout[] = state.Wout
+    LiquidCortex._ref_x[] = state.x
+    LiquidCortex._ref_n_in[] = state.n_in
+    LiquidCortex._ref_n_out[] = state.n_out
+    LiquidCortex._ref_initialized[] = state.initialized
+    return nothing
+end
+
 @testset "LiquidCortex" begin
 
     @testset "Package loads" begin
@@ -29,6 +63,83 @@ using CUDA
     # ── GPU tests (only run when CUDA is available) ──────────────────────────
 
     if LiquidCortex._cuda_available[]
+        @testset "GPU: Reference LSM lazy initialization" begin
+            original_state = snapshot_reference_lsm_state()
+            try
+                clear_reference_lsm_state!()
+                @test !LiquidCortex._ref_is_initialized()
+
+                output = LiquidCortex.run_lsm_step(
+                    zeros(Float32, LiquidCortex.REF_IN_DEFAULT),
+                    0.5f0,
+                )
+
+                @test LiquidCortex._ref_is_initialized()
+                @test length(output) == LiquidCortex.REF_OUT_DEFAULT
+                @test size(LiquidCortex._ref_Win[]) == (
+                    LiquidCortex.REF_N,
+                    LiquidCortex.REF_IN_DEFAULT,
+                )
+                @test size(LiquidCortex._ref_Wout[]) == (
+                    LiquidCortex.REF_OUT_DEFAULT,
+                    LiquidCortex.REF_N,
+                )
+            finally
+                restore_reference_lsm_state!(original_state)
+            end
+        end
+
+        @testset "GPU: Reference LSM custom dimensions" begin
+            original_state = snapshot_reference_lsm_state()
+            try
+                clear_reference_lsm_state!()
+                LiquidCortex._init_ref_lsm!(; n_in=8, n_out=4)
+
+                @test LiquidCortex._ref_is_initialized()
+                @test LiquidCortex._ref_n_in[] == 8
+                @test LiquidCortex._ref_n_out[] == 4
+                @test size(LiquidCortex._ref_Win[]) == (LiquidCortex.REF_N, 8)
+                @test size(LiquidCortex._ref_Wout[]) == (4, LiquidCortex.REF_N)
+
+                output = LiquidCortex.run_lsm_step(zeros(Float32, 8), 0.0f0)
+                @test length(output) == 4
+            finally
+                restore_reference_lsm_state!(original_state)
+            end
+        end
+
+        @testset "GPU: Reference LSM dimension validation" begin
+            original_state = snapshot_reference_lsm_state()
+            try
+                clear_reference_lsm_state!()
+                @test_throws ArgumentError LiquidCortex._init_ref_lsm!(; n_in=0, n_out=4)
+                @test_throws ArgumentError LiquidCortex._init_ref_lsm!(; n_in=4, n_out=0)
+
+                LiquidCortex._init_ref_lsm!(; n_in=LiquidCortex.REF_IN_DEFAULT, n_out=4)
+                @test_throws DimensionMismatch LiquidCortex.run_lsm_step(
+                    zeros(Float32, 8),
+                    0.0f0,
+                )
+            finally
+                restore_reference_lsm_state!(original_state)
+            end
+        end
+
+        @testset "GPU: Reference LSM string output" begin
+            original_state = snapshot_reference_lsm_state()
+            try
+                clear_reference_lsm_state!()
+                output = LiquidCortex.run_lsm_step_str(zeros(Float32, 6), 0.0f0; n_out=3)
+                parts = split(output, ",")
+
+                @test output isa String
+                @test length(parts) == 3
+                @test all(part -> !isempty(part), parts)
+            finally
+                restore_reference_lsm_state!(original_state)
+            end
+        end
+
         @testset "GPU: SparseBrain default dims" begin
             brain = SparseBrain(20.0f0; name="test")
             @test brain isa SparseBrain
