@@ -3,11 +3,13 @@ using LiquidCortex
 using CUDA
 
 function snapshot_reference_lsm_state()
+    # Copy reservoir state: run_lsm_step mutates _ref_x[] in-place.
+    x_snap = LiquidCortex._ref_x[]
     return (
         W=LiquidCortex._ref_W[],
         Win=LiquidCortex._ref_Win[],
         Wout=LiquidCortex._ref_Wout[],
-        x=LiquidCortex._ref_x[],
+        x=isnothing(x_snap) ? nothing : copy(x_snap),
         n_in=LiquidCortex._ref_n_in[],
         n_out=LiquidCortex._ref_n_out[],
         initialized=LiquidCortex._ref_initialized[],
@@ -115,7 +117,9 @@ end
                 @test_throws ArgumentError LiquidCortex._init_ref_lsm!(; n_in=0, n_out=4)
                 @test_throws ArgumentError LiquidCortex._init_ref_lsm!(; n_in=4, n_out=0)
 
-                LiquidCortex._init_ref_lsm!(; n_in=LiquidCortex.REF_IN_DEFAULT, n_out=4)
+                # Hardcode n_in so the mismatch vs input length 8 is guaranteed
+                # regardless of REF_IN_DEFAULT.
+                LiquidCortex._init_ref_lsm!(; n_in=6, n_out=4)
                 @test_throws DimensionMismatch LiquidCortex.run_lsm_step(
                     zeros(Float32, 8),
                     0.0f0,
