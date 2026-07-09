@@ -16,6 +16,8 @@ permissions:
 jobs:
   verify:
     name: Verify Sentry configuration
+    # Secrets are unavailable on fork PRs; skip rather than hard-fail external contributors.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     env:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -33,7 +35,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Install pinned sentry-cli
         env:
@@ -56,5 +58,7 @@ jobs:
 
       - name: Verify Sentry project exists
         run: |
+          set -euo pipefail
           echo "Verifying Sentry project: ${SENTRY_ORG}/${SENTRY_PROJECT}"
-          sentry-cli releases list -p "${SENTRY_PROJECT}" --limit 1 2>&1 | head -5
+          # --limit 1 already constrains output; do not pipe so exit code is preserved
+          sentry-cli releases list -p "${SENTRY_PROJECT}" --limit 1
