@@ -60,5 +60,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "Verifying Sentry project: ${SENTRY_ORG}/${SENTRY_PROJECT}"
-          # --limit 1 already constrains output; do not pipe so exit code is preserved
-          sentry-cli releases list -p "${SENTRY_PROJECT}" --limit 1
+          # sentry-cli 3.4.0 has no --limit; capture full output so exit code is preserved
+          # (and SIGPIPE from `head` cannot mask success/failure).
+          out="$(sentry-cli releases list -p "${SENTRY_PROJECT}" 2>&1)" || {
+            echo "$out"
+            exit 1
+          }
+          echo "$out" | head -5
