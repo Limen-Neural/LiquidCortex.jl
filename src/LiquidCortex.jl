@@ -43,7 +43,8 @@ function __init__()
     dsn = get(ENV, "SENTRY_DSN", "")
     if !isempty(dsn)
         try
-            version = string(Base.pkgversion(@__MODULE__))
+            pv = Base.pkgversion(@__MODULE__)
+            version = pv === nothing ? "unknown" : string(pv)
             Sentry.init(dsn; release="LiquidCortex.jl@$version")
             Sentry.set_tag("package", "LiquidCortex.jl")
             Sentry.set_tag("version", version)
@@ -56,7 +57,9 @@ function __init__()
     end
 end
 
-@noinline function _capture_runtime_exception(exc::Exception, bt)
+# Accept any thrown value (Julia allows non-Exception throws) so capture never
+# raises MethodError and masks the original failure path.
+@noinline function _capture_runtime_exception(@nospecialize(exc), bt)
     _sentry_enabled[] || return nothing
     try
         Sentry.capture_exception([(exc, bt)])
