@@ -59,12 +59,26 @@ end
 
 # Accept any thrown value (Julia allows non-Exception throws) so capture never
 # raises MethodError and masks the original failure path.
+#
+# Never block the rethrow path: Sentry.jl enqueues via a bounded Channel(100),
+# so a full backlog (network outage / burst of failures) would hang step! /
+# ensemble_step! before rethrow if capture were synchronous. Schedule capture
+# asynchronously and only wait briefly; drop waiting (and leave the task
+# running best-effort) if the queue is blocked.
 @noinline function _capture_runtime_exception(@nospecialize(exc), bt)
     _sentry_enabled[] || return nothing
     try
-        Sentry.capture_exception([(exc, bt)])
-    catch sentry_error
-        @warn "LiquidCortex: Failed to capture exception in Sentry" exception=(sentry_error, catch_backtrace())
+        t = @async begin
+            try
+                Sentry.capture_exception([(exc, bt)])
+            catch sentry_error
+                @warn "LiquidCortex: Failed to capture exception in Sentry" exception=(sentry_error, catch_backtrace())
+            end
+        end
+        # Best-effort window for format+enqueue; never hang rethrow on a full queue.
+        timedwait(() -> istaskdone(t), 0.05)
+    catch
+        # Drop capture entirely if scheduling/wait itself fails.
     end
     return nothing
 end
