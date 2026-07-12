@@ -76,7 +76,7 @@ end
             end
         end
         # Best-effort window for format+enqueue; never hang rethrow on a full queue.
-        timedwait(() -> istaskdone(t), 0.05)
+        timedwait(() -> istaskdone(t), 0.05; pollint=0.005)
     catch
         # Drop capture entirely if scheduling/wait itself fails.
     end
