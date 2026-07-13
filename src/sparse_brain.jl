@@ -213,19 +213,8 @@ end
 # Simulation Step: OU-SDE Dynamics + STDP Learning
 # ═══════════════════════════════════════════════════════════════════════════════
 
-"""
-    step!(brain, u; inhibition=0.0, reflex_eta=ETA)
-
-Execute one simulation timestep:
-
-1. **Global Inhibition**: Caller-provided `inhibition` raises V_thresh.
-2. **OU-SDE Dynamics**: 
-   dV_j = ((V_rest - V_j)/τ_m + Σᵢ Wᵢⱼ·Sᵢ(t) + W_in·u) dt + σ·dWₜ
-3. **Spike Detection**: V_j > V_thresh_dynamic → spike, reset to V_reset
-4. **STDP Update**: ΔWᵢⱼ = η · trace_pre_i · trace_post_j (covariance rule)
-5. **Readout**: y = W_out · S (weighted spike count)
-"""
-function step!(brain::SparseBrain, u::CuVector{Float32};
+# Internal implementation; public entry point is `step!` (with Sentry capture).
+function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
     reflex_eta::Real=ETA)
     length(u) == brain.n_in || throw(DimensionMismatch("input has length $(length(u)), expected $(brain.n_in)"))
@@ -296,6 +285,31 @@ function step!(brain::SparseBrain, u::CuVector{Float32};
 
     CUDA.synchronize()
     return nothing
+end
+
+"""
+    step!(brain, u; inhibition=0.0, reflex_eta=ETA)
+
+Execute one simulation timestep:
+
+1. **Global Inhibition**: Caller-provided `inhibition` raises V_thresh.
+2. **OU-SDE Dynamics**:
+   dV_j = ((V_rest - V_j)/τ_m + Σᵢ Wᵢⱼ·Sᵢ(t) + W_in·u) dt + σ·dWₜ
+3. **Spike Detection**: V_j > V_thresh_dynamic → spike, reset to V_reset
+4. **STDP Update**: ΔWᵢⱼ = η · trace_pre_i · trace_post_j (covariance rule)
+5. **Readout**: y = W_out · S (weighted spike count)
+
+Runtime exceptions are captured to Sentry (when configured) before rethrow.
+"""
+function step!(brain::SparseBrain, u::CuVector{Float32};
+    inhibition::Real=0.0f0,
+    reflex_eta::Real=ETA)
+    try
+        _step_impl!(brain, u; inhibition=inhibition, reflex_eta=reflex_eta)
+    catch exc
+        _capture_runtime_exception(exc, catch_backtrace())
+        rethrow()
+    end
 end
 
 """
@@ -414,18 +428,8 @@ function EnsembleBrain(; n_in::Int=14, n_out::Int=16)
     EnsembleBrain(lobes, copy(LOBE_NAMES), agg_output, copy(LOBE_WEIGHTS))
 end
 
-"""
-    ensemble_step!(eb, u; inhibition=0.0, reflex_eta=ETA, reflex_signal=0.0)
-
-Step all 4 lobes independently on the same input, then aggregate readouts.
-
-Reflex Gating: When |reflex_signal| > 0.1, the Fast lobe (index 1, τ_m=10ms)
-  gets a 5× learning rate boost, enabling rapid synaptic adaptation.
-
-Keyword `reflex_eta` (default `ETA`) is the base STDP rate for every lobe;
-the Fast lobe uses `5× reflex_eta` when reflex gating is active.
-"""
-function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
+# Internal implementation; public entry point is `ensemble_step!` (with Sentry capture).
+function _ensemble_step_impl!(eb::EnsembleBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
     reflex_eta::Real=ETA,
     reflex_signal::Real=0.0f0)
@@ -442,7 +446,7 @@ function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
     # Step all lobes with generic inhibition
     for (i, lobe) in enumerate(eb.lobes)
         eta_lobe = (i == 1) ? reflex_fast : reflex_eta  # Lobe 1 = Fast
-        step!(lobe, u; inhibition=inhibition, reflex_eta=eta_lobe)
+        _step_impl!(lobe, u; inhibition=inhibition, reflex_eta=eta_lobe)
     end
 
     # Aggregate readouts: weighted sum across lobes
@@ -454,6 +458,34 @@ function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
 
     CUDA.synchronize()
     return nothing
+end
+
+"""
+    ensemble_step!(eb, u; inhibition=0.0, reflex_eta=ETA, reflex_signal=0.0)
+
+Step all 4 lobes independently on the same input, then aggregate readouts.
+
+Reflex Gating: When |reflex_signal| > 0.1, the Fast lobe (index 1, τ_m=10ms)
+  gets a 5× learning rate boost, enabling rapid synaptic adaptation.
+
+Keyword `reflex_eta` (default `ETA`) is the base STDP rate for every lobe;
+the Fast lobe uses `5× reflex_eta` when reflex gating is active.
+
+Runtime exceptions are captured to Sentry (when configured) before rethrow.
+"""
+function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
+    inhibition::Real=0.0f0,
+    reflex_eta::Real=ETA,
+    reflex_signal::Real=0.0f0)
+    try
+        _ensemble_step_impl!(eb, u;
+            inhibition=inhibition,
+            reflex_eta=reflex_eta,
+            reflex_signal=reflex_signal)
+    catch exc
+        _capture_runtime_exception(exc, catch_backtrace())
+        rethrow()
+    end
 end
 
 """

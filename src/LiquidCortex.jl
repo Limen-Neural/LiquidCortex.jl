@@ -25,8 +25,12 @@ using Sentry
 # ── CUDA availability flag ────────────────────────────────────────────────
 # Checked at __init__ time. All GPU allocations are deferred until this is true.
 const _cuda_available = Ref{Bool}(false)
+const _sentry_enabled = Ref{Bool}(false)
 
 function __init__()
+    _cuda_available[] = false
+    _sentry_enabled[] = false
+
     if CUDA.functional()
         _cuda_available[] = true
         @info "LiquidCortex: CUDA functional — GPU kernels available on $(CUDA.name(CUDA.device()))."
@@ -39,14 +43,44 @@ function __init__()
     dsn = get(ENV, "SENTRY_DSN", "")
     if !isempty(dsn)
         try
-            Sentry.init(dsn)
+            pv = Base.pkgversion(@__MODULE__)
+            version = pv === nothing ? "unknown" : string(pv)
+            Sentry.init(dsn; release="LiquidCortex.jl@$version")
             Sentry.set_tag("package", "LiquidCortex.jl")
+            Sentry.set_tag("version", version)
             Sentry.set_tag("julia_version", string(VERSION))
+            _sentry_enabled[] = true
             @info "LiquidCortex: Sentry error capture enabled."
         catch e
             @warn "LiquidCortex: Failed to initialize Sentry" exception=(e, catch_backtrace())
         end
     end
+end
+
+# Accept any thrown value (Julia allows non-Exception throws) so capture never
+# raises MethodError and masks the original failure path.
+#
+# Never block the rethrow path: Sentry.jl enqueues via a bounded Channel(100),
+# so a full backlog (network outage / burst of failures) would hang step! /
+# ensemble_step! before rethrow if capture were synchronous. Schedule capture
+# asynchronously and only wait briefly; drop waiting (and leave the task
+# running best-effort) if the queue is blocked.
+@noinline function _capture_runtime_exception(@nospecialize(exc), bt)
+    _sentry_enabled[] || return nothing
+    try
+        t = @async begin
+            try
+                Sentry.capture_exception([(exc, bt)])
+            catch sentry_error
+                @warn "LiquidCortex: Failed to capture exception in Sentry" exception=(sentry_error, catch_backtrace())
+            end
+        end
+        # Best-effort window for format+enqueue; never hang rethrow on a full queue.
+        timedwait(() -> istaskdone(t), 0.05; pollint=0.005)
+    catch
+        # Drop capture entirely if scheduling/wait itself fails.
+    end
+    return nothing
 end
 
 # ── GPU source files (structs defined at load; GPU allocations deferred to
