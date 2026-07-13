@@ -40,3 +40,8 @@ Julia package with CUDA acceleration, cuSPARSE Float16, STDP covariance learning
 - Pin GitHub Actions to full commit SHAs (not tags)
 - Use `julia-actions/julia-processcoverage` for coverage — not Coverage.jl in Project.toml
 - README must use pure markdown — no HTML elements (Codacy lints `<a>` and `<img>`)
+
+## Cursor Cloud specific instructions
+
+- Julia is provided via `juliaup` with default channel **1.12** (within this repo's `1.10, 1.11, 1.12` compat). Standard setup applies: `julia --project -e 'using Pkg; Pkg.instantiate()'` then `Pkg.test()`.
+- The Cursor Cloud VM has **no CUDA GPU**. `Pkg.test()` loads CUDA artifacts and runs the CPU tests; the single GPU test is reported as `broken` (this is expected — the suite still passes). GPU paths (`step!` and cuSPARSE ops) require a real device and cannot be exercised here.
