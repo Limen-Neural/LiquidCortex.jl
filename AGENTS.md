@@ -43,5 +43,5 @@ Julia package with CUDA acceleration, cuSPARSE Float16, STDP covariance learning
 
 ## Cursor Cloud specific instructions
 
-- Julia is provided via `juliaup` with default channel **1.12** (within this repo's `1.10, 1.11, 1.12` compat). Standard setup applies: `julia --project -e 'using Pkg; Pkg.instantiate()'` then `Pkg.test()`.
-- The Cursor Cloud VM has **no CUDA GPU**. `Pkg.test()` loads CUDA artifacts and runs the CPU tests; the single GPU test is reported as `broken` (this is expected — the suite still passes). GPU paths (`step!` and cuSPARSE ops) require a real device and cannot be exercised here.
+- Julia is provided via `juliaup` with default channel **1.12** (within this repo's `1.10, 1.11, 1.12` compat). Standard setup applies: `julia --project -e 'using Pkg; Pkg.instantiate()'` then `julia --project -e 'using Pkg; Pkg.test()'`.
+- The Cursor Cloud VM has **no CUDA GPU**. The test command loads CUDA artifacts and runs the CPU tests; the GPU test block is skipped (this is expected — the suite still passes). GPU paths (`step!` and cuSPARSE ops) require a real device and cannot be exercised here.
