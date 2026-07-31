@@ -254,7 +254,9 @@ const PLASTICITY_MODES = (:readout_only, :recurrent_stdp, :none)
 
 """Materialize CSC edge lists for pair STDP (lazy — avoids ~300MB/lobe when unused)."""
 function _ensure_edge_indices!(brain::SparseBrain)
-    length(brain.pre_idx) == brain.nnz && brain.nnz > 0 && return nothing
+    # Both buffers must be complete; a partial upload (pre ok, post failed) must rebuild.
+    length(brain.pre_idx) == brain.nnz && length(brain.post_idx) == brain.nnz &&
+        brain.nnz > 0 && return nothing
     colPtr = Array(brain.W.colPtr)
     rowVal = Array(brain.W.rowVal)
     n_cols = length(colPtr) - 1
@@ -309,18 +311,23 @@ end
 # Simulation Step: OU-SDE Dynamics + STDP Learning
 # ═══════════════════════════════════════════════════════════════════════════════
 
+"""CPU-safe plasticity/recurrent_eta checks (no GPU types)."""
+function _validate_plasticity_kwargs(; plasticity::Symbol, recurrent_eta::Real)
+    plasticity in PLASTICITY_MODES || throw(LiquidCortexValidationError(
+        "plasticity must be one of $PLASTICITY_MODES, got :$plasticity"))
+    if plasticity === :recurrent_stdp
+        isfinite(Float32(recurrent_eta)) || throw(LiquidCortexValidationError(
+            "recurrent_eta must be finite, got $recurrent_eta"))
+    end
+    return nothing
+end
+
 """Validate public step kwargs. Throws `LiquidCortexValidationError` on misuse."""
-function _validate_step_kwargs!(brain::SparseBrain, u::CuVector{Float32};
+function _validate_step_kwargs!(brain::SparseBrain, u::AbstractVector;
     plasticity::Symbol, recurrent_eta::Real)
     length(u) == brain.n_in || throw(LiquidCortexValidationError(
         "input has length $(length(u)), expected $(brain.n_in)"))
-    plasticity in PLASTICITY_MODES || throw(LiquidCortexValidationError(
-        "plasticity must be one of $PLASTICITY_MODES, got :$plasticity"))
-    re = Float32(recurrent_eta)
-    if plasticity === :recurrent_stdp
-        isfinite(re) || throw(LiquidCortexValidationError(
-            "recurrent_eta must be finite, got $recurrent_eta"))
-    end
+    _validate_plasticity_kwargs(; plasticity=plasticity, recurrent_eta=recurrent_eta)
     return nothing
 end
 
@@ -356,8 +363,10 @@ function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
         try
             Random.randn!(brain.noise)
         catch e
+            # Preserve cancel / GPU faults; only fall back for RNG path failures.
             e isa InterruptException && rethrow()
-            # Fall back for RNG compile / unsupported device RNG failures only.
+            e isa CUDA.OutOfGPUMemoryError && rethrow()
+            e isa CUDA.CuError && rethrow()
             copyto!(brain.noise, randn(Float32, N))
         end
     else
@@ -599,9 +608,13 @@ function _ensemble_step_impl!(eb::EnsembleBrain, u::CuVector{Float32};
         reflex_eta            # Normal learning rate
     end
 
+    # Validate once before any STDP edge prewarm (avoids large allocs on bad kwargs).
+    isempty(eb.lobes) || _validate_step_kwargs!(eb.lobes[1], u;
+        plasticity=plasticity, recurrent_eta=recurrent_eta)
+
     # Prewarm STDP edge lists before the async lobe loop so the first
     # :recurrent_stdp ensemble step does not host-sync mid-loop per lobe.
-    if plasticity === :recurrent_stdp && recurrent_eta != 0.0f0
+    if plasticity === :recurrent_stdp && Float32(recurrent_eta) != 0.0f0
         for lobe in eb.lobes
             _ensure_edge_indices!(lobe)
         end

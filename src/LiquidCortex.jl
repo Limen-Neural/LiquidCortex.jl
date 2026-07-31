@@ -78,13 +78,18 @@ Base.showerror(io::IO, e::LiquidCortexValidationError) =
     return !(exc isa LiquidCortexValidationError)
 end
 
-@noinline function _tag_gpu_failure!(@nospecialize(exc))
+# Sentry.jl tags are process-global; set explicit defaults every capture so a
+# prior GPU OOM cannot mislabel a later non-GPU exception (and vice versa).
+@noinline function _tag_runtime_exception!(@nospecialize(exc))
     if exc isa CUDA.OutOfGPUMemoryError
         Sentry.set_tag("gpu_failure", "true")
         Sentry.set_tag("error_class", "gpu_oom")
     elseif exc isa CUDA.CuError
         Sentry.set_tag("gpu_failure", "true")
         Sentry.set_tag("error_class", "cuda_error")
+    else
+        Sentry.set_tag("gpu_failure", "false")
+        Sentry.set_tag("error_class", "runtime")
     end
     return nothing
 end
@@ -95,7 +100,7 @@ end
     try
         t = @async begin
             try
-                _tag_gpu_failure!(exc)
+                _tag_runtime_exception!(exc)
                 Sentry.capture_exception([(exc, bt)])
             catch sentry_error
                 @warn "LiquidCortex: Failed to capture exception in Sentry" exception=(sentry_error, catch_backtrace())

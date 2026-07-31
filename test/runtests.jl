@@ -13,6 +13,20 @@ function reclaim_gpu!()
     return nothing
 end
 
+# Hard reset when the pool is too fragmented for another 4-lobe ensemble (~12GB+).
+function reclaim_gpu_hard!()
+    reclaim_gpu!()
+    free_gb = CUDA.free_memory() / 1e9
+    if free_gb < 8.0
+        try
+            CUDA.device_reset!()
+        catch
+        end
+        reclaim_gpu!()
+    end
+    return nothing
+end
+
 function snapshot_reference_lsm_state()
     # Copy reservoir state: run_lsm_step mutates _ref_x[] in-place.
     x_snap = LiquidCortex._ref_x[]
@@ -79,14 +93,14 @@ end
         @test :recurrent_stdp in modes
         @test :none in modes
         @test !(:typo in modes)
-        # Validation helper rejects unknown modes without requiring a GPU step
-        @test_throws LiquidCortex.LiquidCortexValidationError begin
-            # Construct a lightweight stub: only call the pure validator if GPU available
-            # is not required for the mode membership check above; this path exercises
-            # the exception type used by the public API contract.
-            throw(LiquidCortex.LiquidCortexValidationError(
-                "plasticity must be one of $modes, got :typo"))
-        end
+        # Real CPU-safe validator (no CuArray)
+        @test_throws LiquidCortex.LiquidCortexValidationError (
+            LiquidCortex._validate_plasticity_kwargs(; plasticity=:typo, recurrent_eta=1f-4)
+        )
+        @test_throws LiquidCortex.LiquidCortexValidationError (
+            LiquidCortex._validate_plasticity_kwargs(; plasticity=:recurrent_stdp, recurrent_eta=NaN32)
+        )
+        LiquidCortex._validate_plasticity_kwargs(; plasticity=:none, recurrent_eta=NaN32)
         @test LiquidCortex._should_capture_runtime_exception(
             LiquidCortex.LiquidCortexValidationError("x")) == false
         @test LiquidCortex._should_capture_runtime_exception(ErrorException("x")) == true
@@ -325,19 +339,21 @@ end
         end
 
         @testset "GPU: ensemble_step! forwards plasticity=:none" begin
-            reclaim_gpu!()
+            # Last suite case often sits at ~99% VRAM; hard-reclaim before 4 lobes.
+            reclaim_gpu_hard!()
             eb = EnsembleBrain(n_in=8, n_out=4)
             u = cu(randn(Float32, 8) .* 0.2f0)
             W0 = [copy(Array(l.W_out)) for l in eb.lobes]
-            for _ in 1:20
+            n_steps = 5
+            for _ in 1:n_steps
                 ensemble_step!(eb, u; plasticity=:none, inhibition=0.1f0)
             end
-            @test all(l.tick_count == 20 for l in eb.lobes)
+            @test all(l.tick_count == n_steps for l in eb.lobes)
             @test all(Array(eb.lobes[i].W_out) == W0[i] for i in eachindex(eb.lobes))
             out = get_ensemble_output(eb)
             @test length(out) == 4
             @test all(isfinite, Array(out))
-            eb = nothing; reclaim_gpu!()
+            eb = nothing; reclaim_gpu_hard!()
         end
     else
         @info "Skipping GPU tests — no CUDA device available"

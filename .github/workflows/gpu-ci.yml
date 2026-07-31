@@ -2,6 +2,9 @@ name: GPU CI (self-hosted)
 
 # Runs Julia package tests on the local RTX-class runner (labels: self-hosted, Linux, X64, gpu).
 # CPU smoke stays on ubuntu-latest in ci.yml; this job exercises CUDA kernels.
+#
+# Security: never run untrusted fork PR code on the persistent self-hosted host
+# (GitHub recommendation). Same-repo PRs, pushes, and manual dispatch only.
 on:
   pull_request:
     branches:
@@ -12,10 +15,10 @@ on:
       - 'release/*'
   workflow_dispatch:
 
-# Single GPU host: at most one GPU job for this repo at a time.
-# cancel-in-progress frees the card for the latest commit on a ref.
+# Serialize per-ref so an unrelated PR does not cancel main/release GPU jobs.
+# The single self-hosted runner still runs at most one job at a time.
 concurrency:
-  group: liquidcortex-gpu-${{ github.repository }}
+  group: liquidcortex-gpu-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -24,6 +27,10 @@ permissions:
 jobs:
   gpu-test:
     name: Julia 1.12 — GPU tests (self-hosted)
+    # Fork PRs: skip (do not checkout untrusted code onto the GPU host).
+    if: >
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64, gpu]
     timeout-minutes: 60
 
@@ -31,18 +38,21 @@ jobs:
       # Optional: report step! failures to liquidcortex project during CI
       SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
       JULIA_NUM_THREADS: "1"
-      # Prefer host CUDA / juliaup defaults already on the machine
       JULIA_PKG_PRECOMPILE_AUTO: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Verify host toolchain
         run: |
           set -euo pipefail
           command -v julia
           julia --version
+          # Job claims Julia 1.12; fail early if runner default drifts.
+          julia -e 'VERSION.major == 1 && VERSION.minor == 12 || error("expected Julia 1.12, got $VERSION")'
           nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 
       - name: Instantiate
