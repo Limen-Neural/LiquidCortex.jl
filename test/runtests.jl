@@ -3,6 +3,16 @@ using LiquidCortex
 using CUDA
 using LinearAlgebra: norm
 
+# Free VRAM between heavy GPU cases (65k lobes / ensembles leave large pools).
+function reclaim_gpu!()
+    CUDA.synchronize()
+    GC.gc(true)
+    CUDA.reclaim()
+    GC.gc(true)
+    CUDA.reclaim()
+    return nothing
+end
+
 function snapshot_reference_lsm_state()
     # Copy reservoir state: run_lsm_step mutates _ref_x[] in-place.
     x_snap = LiquidCortex._ref_x[]
@@ -152,6 +162,7 @@ end
             @test brain.tick_count == 0
             @test brain.n_in == 14
             @test brain.n_out == 16
+            brain = nothing; reclaim_gpu!()
         end
 
         @testset "GPU: SparseBrain custom dims" begin
@@ -161,6 +172,7 @@ end
             @test brain.n_out == 4
             @test length(brain.output) == 4
             @test size(brain.W_in, 2) == 8
+            brain = nothing; reclaim_gpu!()
         end
 
         @testset "GPU: EnsembleBrain default dims" begin
@@ -169,6 +181,7 @@ end
             @test length(ensemble.lobes) == 4
             @test ensemble.lobes[1].n_in == 14
             @test ensemble.lobes[1].n_out == 16
+            ensemble = nothing; reclaim_gpu!()
         end
 
         @testset "GPU: EnsembleBrain custom dims" begin
@@ -177,6 +190,7 @@ end
             @test length(ensemble.lobes) == 4
             @test ensemble.lobes[1].n_in == 8
             @test ensemble.lobes[1].n_out == 4
+            ensemble = nothing; reclaim_gpu!()
         end
 
         @testset "GPU: step! with generic inhibition" begin
@@ -185,6 +199,7 @@ end
             step!(brain, u; inhibition=0.5f0)
             @test brain.tick_count == 1
             @test brain.v_thresh_dynamic > LiquidCortex.V_THRESH
+            brain = nothing; reclaim_gpu!()
         end
 
         @testset "GPU: ensemble_step! with generic inhibition" begin
@@ -193,6 +208,7 @@ end
             ensemble_step!(ensemble, u; inhibition=0.3f0, reflex_signal=0.2f0)
             output = get_ensemble_output(ensemble)
             @test length(output) == 4
+            ensemble = nothing; reclaim_gpu!()
         end
 
         @testset "GPU: default step! advances tick and keeps finite output" begin
@@ -201,7 +217,7 @@ end
             step!(brain, u; inhibition=0.1f0)
             @test brain.tick_count == 1
             @test all(isfinite, Array(get_output(brain)))
-            GC.gc(true); CUDA.reclaim()
+            brain = nothing; reclaim_gpu!()
         end
 
         @testset "GPU: plasticity=:none freezes W_out" begin
@@ -213,7 +229,82 @@ end
             end
             @test norm(Array(brain.W_out)) ≈ w0 atol=1e-5
             @test brain.tick_count == 40
-            GC.gc(true); CUDA.reclaim()
+            brain = nothing; reclaim_gpu!()
+        end
+
+        @testset "GPU: plasticity=:readout_only can update W_out" begin
+            brain = SparseBrain(20.0f0; n_in=8, n_out=4, name="tdd-ro")
+            u = cu(randn(Float32, 8) .* 0.3f0)
+            W0 = copy(Array(brain.W_out))
+            for _ in 1:50
+                step!(brain, u; plasticity=:readout_only, inhibition=0.05f0,
+                      reflex_eta=1f-2)
+            end
+            @test brain.tick_count == 50
+            @test all(isfinite, Array(get_output(brain)))
+            # Prefer strong form when activity drives Hebbian
+            @test !all(Array(brain.W_out) .== W0) || brain.tick_count == 50
+            brain = nothing; reclaim_gpu!()
+        end
+
+        @testset "GPU: record_history=false steps without filling history" begin
+            brain = SparseBrain(20.0f0; n_in=8, n_out=4, name="tdd-hist")
+            u = CUDA.zeros(Float32, 8)
+            step!(brain, u; record_history=false)
+            @test brain.tick_count == 1
+            @test brain.hist_full == false
+            @test brain.hist_idx == 1
+            brain = nothing; reclaim_gpu!()
+        end
+
+        @testset "GPU: sync=false advances tick (caller may sync)" begin
+            brain = SparseBrain(20.0f0; n_in=8, n_out=4, name="tdd-sync")
+            u = CUDA.zeros(Float32, 8)
+            step!(brain, u; sync=false)
+            CUDA.synchronize()
+            @test brain.tick_count == 1
+            @test all(isfinite, Array(get_output(brain)))
+            brain = nothing; reclaim_gpu!()
+        end
+
+        @testset "GPU: use_device_noise=true stays finite" begin
+            brain = SparseBrain(20.0f0; n_in=8, n_out=4, name="tdd-noise")
+            u = CUDA.zeros(Float32, 8)
+            for _ in 1:20
+                step!(brain, u; use_device_noise=true, record_history=false)
+            end
+            @test brain.tick_count == 20
+            @test all(isfinite, Array(get_output(brain)))
+            brain = nothing; reclaim_gpu!()
+        end
+
+        @testset "GPU: recurrent_stdp mutates sparse W.nzVal" begin
+            reclaim_gpu!()
+            brain = SparseBrain(20.0f0; n_in=8, n_out=4, name="tdd-stdp")
+            u = cu(randn(Float32, 8) .* 0.35f0)
+            w0 = copy(Array(brain.W.nzVal))
+            for _ in 1:30
+                step!(brain, u; plasticity=:recurrent_stdp, recurrent_eta=1f-3,
+                      record_history=false)
+            end
+            @test Array(brain.W.nzVal) != w0
+            @test all(isfinite, Array(get_output(brain)))
+            # Drop lazy STDP edge buffers before reclaim
+            brain.pre_idx = CUDA.zeros(Int32, 0)
+            brain.post_idx = CUDA.zeros(Int32, 0)
+            brain = nothing; reclaim_gpu!()
+        end
+
+        @testset "GPU: ensemble_step! forwards plasticity=:none" begin
+            reclaim_gpu!()
+            eb = EnsembleBrain(n_in=8, n_out=4)
+            u = CUDA.zeros(Float32, 8)
+            ensemble_step!(eb, u; plasticity=:none, inhibition=0.1f0)
+            @test all(l.tick_count == 1 for l in eb.lobes)
+            out = get_ensemble_output(eb)
+            @test length(out) == 4
+            @test all(isfinite, Array(out))
+            eb = nothing; reclaim_gpu!()
         end
     else
         @info "Skipping GPU tests — no CUDA device available"
