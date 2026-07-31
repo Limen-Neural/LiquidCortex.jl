@@ -65,8 +65,16 @@ end
 # ensemble_step! before rethrow if capture were synchronous. Schedule capture
 # asynchronously and only wait briefly; drop waiting (and leave the task
 # running best-effort) if the queue is blocked.
+#
+# Skip API-contract errors (caller misuse / unit tests): ArgumentError and
+# DimensionMismatch are expected rethrows, not production faults.
+@noinline function _should_capture_runtime_exception(@nospecialize(exc))
+    return !(exc isa ArgumentError || exc isa DimensionMismatch)
+end
+
 @noinline function _capture_runtime_exception(@nospecialize(exc), bt)
     _sentry_enabled[] || return nothing
+    _should_capture_runtime_exception(exc) || return nothing
     try
         t = @async begin
             try
