@@ -247,6 +247,8 @@ function SparseBrain(tau_m::Float32; n_in::Int=14, n_out::Int=16, name::String="
     )
 end
 
+const PLASTICITY_MODES = (:readout_only, :recurrent_stdp, :none)
+
 """Materialize CSC edge lists for pair STDP (lazy — avoids ~300MB/lobe when unused)."""
 function _ensure_edge_indices!(brain::SparseBrain)
     length(brain.pre_idx) == brain.nnz && brain.nnz > 0 && return nothing
@@ -254,11 +256,18 @@ function _ensure_edge_indices!(brain::SparseBrain)
     rowVal = Array(brain.W.rowVal)
     n_cols = length(colPtr) - 1
     edge_nnz = length(rowVal)
+    # CSC invariant: colPtr[end] == length(rowVal) + 1 (1-based Julia SparseArrays)
+    colPtr[end] == edge_nnz + 1 ||
+        throw(ArgumentError("Malformed CSC: colPtr[end]=$(colPtr[end]) vs nnz+1=$(edge_nnz + 1)"))
     pre = Vector{Int32}(undef, edge_nnz)
     post = Vector{Int32}(undef, edge_nnz)
     k = 1
     @inbounds for col in 1:n_cols
-        for p in colPtr[col]:(colPtr[col + 1] - 1)
+        p_lo = colPtr[col]
+        p_hi = colPtr[col + 1] - 1
+        p_hi > edge_nnz && throw(ArgumentError(
+            "Malformed CSC: colPtr[$(col + 1)]=$(colPtr[col + 1]) exceeds nnz=$edge_nnz"))
+        for p in p_lo:p_hi
             post[k] = Int32(rowVal[p])
             pre[k] = Int32(col)
             k += 1
@@ -297,6 +306,8 @@ function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
     record_history::Bool=true,
     use_device_noise::Bool=false)
     length(u) == brain.n_in || throw(DimensionMismatch("input has length $(length(u)), expected $(brain.n_in)"))
+    plasticity in PLASTICITY_MODES || throw(ArgumentError(
+        "plasticity must be one of $PLASTICITY_MODES, got :$plasticity"))
     brain.tick_count += 1
     inhibition = Float32(inhibition)
     reflex_eta = Float32(reflex_eta)
@@ -314,8 +325,13 @@ function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
 
     mul!(brain.I_ext, brain.W_in, u)
 
+    # Host noise is the portable default; device RNG may fail on some stacks.
     if use_device_noise
-        Random.randn!(brain.noise)
+        try
+            Random.randn!(brain.noise)
+        catch
+            copyto!(brain.noise, randn(Float32, N))
+        end
     else
         copyto!(brain.noise, randn(Float32, N))
     end
@@ -333,9 +349,13 @@ function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
     brain.V .= ifelse.(spiked, Float32(V_RESET), brain.V)
     brain.refrac .= ifelse.(spiked, Int32(REFRAC_T), max.(brain.refrac .- Int32(1), Int32(0)))
 
-    n_spikes = sum(brain.S)
-    brain.total_spikes += round(Int64, n_spikes)
-    brain.last_spike_rate = n_spikes / N
+    # Host reductions force a stream wait. Skip when sync=false so ensemble
+    # mid-lobe loops do not reintroduce implicit barriers (bench / chain mode).
+    if sync
+        n_spikes = sum(brain.S)
+        brain.total_spikes += round(Int64, n_spikes)
+        brain.last_spike_rate = n_spikes / N
+    end
 
     # ── 4. Optional history ──────────────────────────────────────────────────
     if record_history
@@ -564,7 +584,15 @@ function _ensemble_step_impl!(eb::EnsembleBrain, u::CuVector{Float32};
         eb.agg_output .+= eb.weights[i] .* lobe.output
     end
 
-    sync && CUDA.synchronize()
+    # Diagnostics deferred to end of ensemble (lobes used sync=false).
+    if sync
+        for lobe in eb.lobes
+            n_spikes = sum(lobe.S)
+            lobe.total_spikes += round(Int64, n_spikes)
+            lobe.last_spike_rate = n_spikes / N
+        end
+        CUDA.synchronize()
+    end
     return nothing
 end
 
@@ -635,10 +663,14 @@ end
 # ── step! for EnsembleBrain ──
 
 """
-    step!(eb::EnsembleBrain, u; inhibition=0.0, reflex_eta=ETA, reflex_signal=0.0)
+    step!(eb::EnsembleBrain, u; inhibition=0.0, reflex_eta=ETA, reflex_signal=0.0,
+          plasticity=:readout_only, recurrent_eta=1f-4, sync=true,
+          record_history=true, use_device_noise=false)
 
 Forwards to [`ensemble_step!`](@ref).
 Keyword `reflex_signal` (default `0`) controls fast-lobe reflex gating.
+Also forwards `plasticity`, `recurrent_eta`, `sync`, `record_history`, and
+`use_device_noise`.
 """
 function step!(eb::EnsembleBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,

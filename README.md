@@ -72,15 +72,15 @@ output = get_output(brain)
 
 LiquidCortex is an experimental Julia package. Defaults are intentional:
 
-| Keyword | Default | Meaning |
-|---------|---------|---------|
-| `plasticity` | `:readout_only` | Frozen recurrent `W`; Hebbian `W_out` every 10 ticks |
-| `plasticity` | `:recurrent_stdp` | Experimental pair STDP on sparse edges every tick |
-| `plasticity` | `:none` | No weight updates |
-| `recurrent_eta` | `1f-4` | Learning rate for `:recurrent_stdp` |
-| `sync` | `true` | `CUDA.synchronize()` at end of step |
-| `record_history` | `true` | Write spike history for covariance helpers |
-| `use_device_noise` | `false` | Host Gaussian noise upload (device RNG optional) |
+| Keyword | Default / values | Meaning |
+|---------|------------------|---------|
+| `plasticity` | **default** `:readout_only` | Frozen recurrent `W`; Hebbian `W_out` every 10 ticks |
+| | opt-in `:recurrent_stdp` | Experimental pair STDP on sparse edges every tick |
+| | opt-in `:none` | No weight updates |
+| `recurrent_eta` | default `1f-4` | Learning rate for `:recurrent_stdp` |
+| `sync` | default `true` | `CUDA.synchronize()` at end of step; host spike diagnostics only when true |
+| `record_history` | default `true` | Write spike history; if false, covariance helpers may see stale/incomplete history |
+| `use_device_noise` | default `false` | Host Gaussian noise upload; device RNG with host fallback if unavailable |
 
 Recurrent reservoir weights are **not** trained under the default path.
 Requires **CUDA.jl 6.x**. Local verification uses **Julia 1.12**.

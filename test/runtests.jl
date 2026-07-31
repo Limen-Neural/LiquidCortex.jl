@@ -229,6 +229,7 @@ end
             end
             @test norm(Array(brain.W_out)) ≈ w0 atol=1e-5
             @test brain.tick_count == 40
+            @test_throws ArgumentError step!(brain, u; plasticity=:typo)
             brain = nothing; reclaim_gpu!()
         end
 
@@ -242,8 +243,7 @@ end
             end
             @test brain.tick_count == 50
             @test all(isfinite, Array(get_output(brain)))
-            # Prefer strong form when activity drives Hebbian
-            @test !all(Array(brain.W_out) .== W0) || brain.tick_count == 50
+            @test !all(Array(brain.W_out) .== W0)
             brain = nothing; reclaim_gpu!()
         end
 
