@@ -38,16 +38,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Verify GPU + Julia
+      - name: Verify host toolchain
         run: |
           set -euo pipefail
           command -v julia
           julia --version
           nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
-          julia -e 'using CUDA; @assert CUDA.functional(); println(CUDA.name(CUDA.device()))'
 
       - name: Instantiate
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+
+      - name: Verify CUDA.jl in project
+        run: |
+          set -euo pipefail
+          julia --project=. -e '
+            using CUDA
+            @assert CUDA.functional() "CUDA.jl reports non-functional device"
+            println(CUDA.name(CUDA.device()))
+          '
 
       - name: Run tests (CPU + GPU)
         run: julia --project=. -e 'using Pkg; Pkg.test()'
@@ -55,7 +63,7 @@ jobs:
       - name: Reclaim GPU memory
         if: always()
         run: |
-          julia -e '
+          julia --project=. -e '
             using CUDA
             if CUDA.functional()
               CUDA.synchronize()
