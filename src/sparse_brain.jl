@@ -216,7 +216,8 @@ end
 # Internal implementation; public entry point is `step!` (with Sentry capture).
 function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
-    reflex_eta::Real=ETA)
+    reflex_eta::Real=ETA,
+    plasticity::Symbol=:readout_only)
     length(u) == brain.n_in || throw(DimensionMismatch("input has length $(length(u)), expected $(brain.n_in)"))
     brain.tick_count += 1
     inhibition = Float32(inhibition)
@@ -271,9 +272,8 @@ function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
     brain.trace_pre .= brain.trace_pre .* (1.0f0 - DT / TAU_TRACE) .+ brain.S
     brain.trace_post .= brain.trace_post .* (1.0f0 - DT / TAU_TRACE) .+ brain.S
 
-    # STDP weight update on W_out every 10 ticks (Hebbian readout rule):
-    # ΔW_out[i,j] = reflex_eta * S_out[i] * trace_pre[j]
-    if brain.tick_count % 10 == 0
+    # Hebbian readout on W_out every 10 ticks (skipped when plasticity=:none)
+    if plasticity !== :none && brain.tick_count % 10 == 0
         S_out = brain.output .> 0.0f0
         dW_out = reflex_eta .* (Float32.(S_out) * brain.trace_pre')
         brain.W_out .+= dW_out
@@ -288,7 +288,7 @@ function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
 end
 
 """
-    step!(brain, u; inhibition=0.0, reflex_eta=ETA)
+    step!(brain, u; inhibition=0.0, reflex_eta=ETA, plasticity=:readout_only)
 
 Execute one simulation timestep:
 
@@ -296,16 +296,20 @@ Execute one simulation timestep:
 2. **OU-SDE Dynamics**:
    dV_j = ((V_rest - V_j)/τ_m + Σᵢ Wᵢⱼ·Sᵢ(t) + W_in·u) dt + σ·dWₜ
 3. **Spike Detection**: V_j > V_thresh_dynamic → spike, reset to V_reset
-4. **STDP Update**: ΔWᵢⱼ = η · trace_pre_i · trace_post_j (covariance rule)
+4. **Learning**: `plasticity=:readout_only` (default) Hebbian W_out every 10 ticks;
+   `plasticity=:none` freezes all weights. Recurrent W stays frozen unless a later
+   experimental mode is enabled.
 5. **Readout**: y = W_out · S (weighted spike count)
 
 Runtime exceptions are captured to Sentry (when configured) before rethrow.
 """
 function step!(brain::SparseBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
-    reflex_eta::Real=ETA)
+    reflex_eta::Real=ETA,
+    plasticity::Symbol=:readout_only)
     try
-        _step_impl!(brain, u; inhibition=inhibition, reflex_eta=reflex_eta)
+        _step_impl!(brain, u; inhibition=inhibition, reflex_eta=reflex_eta,
+                    plasticity=plasticity)
     catch exc
         _capture_runtime_exception(exc, catch_backtrace())
         rethrow()

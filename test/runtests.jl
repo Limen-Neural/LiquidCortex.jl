@@ -1,6 +1,7 @@
 using Test
 using LiquidCortex
 using CUDA
+using LinearAlgebra: norm
 
 function snapshot_reference_lsm_state()
     # Copy reservoir state: run_lsm_step mutates _ref_x[] in-place.
@@ -192,6 +193,27 @@ end
             ensemble_step!(ensemble, u; inhibition=0.3f0, reflex_signal=0.2f0)
             output = get_ensemble_output(ensemble)
             @test length(output) == 4
+        end
+
+        @testset "GPU: default step! advances tick and keeps finite output" begin
+            brain = SparseBrain(20.0f0; n_in=8, n_out=4, name="tdd-default")
+            u = CUDA.zeros(Float32, 8)
+            step!(brain, u; inhibition=0.1f0)
+            @test brain.tick_count == 1
+            @test all(isfinite, Array(get_output(brain)))
+            GC.gc(true); CUDA.reclaim()
+        end
+
+        @testset "GPU: plasticity=:none freezes W_out" begin
+            brain = SparseBrain(20.0f0; n_in=8, n_out=4, name="tdd-none")
+            u = cu(randn(Float32, 8) .* 0.2f0)
+            w0 = norm(Array(brain.W_out))
+            for _ in 1:40
+                step!(brain, u; plasticity=:none, inhibition=0.1f0)
+            end
+            @test norm(Array(brain.W_out)) ≈ w0 atol=1e-5
+            @test brain.tick_count == 40
+            GC.gc(true); CUDA.reclaim()
         end
     else
         @info "Skipping GPU tests — no CUDA device available"
