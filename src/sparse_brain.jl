@@ -417,7 +417,8 @@ function EnsembleBrain(; n_in::Int=14, n_out::Int=16)
     agg_output = CUDA.zeros(Float32, n_out)
 
     CUDA.synchronize()
-    free_mem = CUDA.available_memory() / 1e9
+    # CUDA.jl 6+: free_memory() replaces available_memory()
+    free_mem = CUDA.free_memory() / 1e9
     total_mem = CUDA.total_memory() / 1e9
     used = total_mem - free_mem
     println("═══════════════════════════════════════════════════════════════")
