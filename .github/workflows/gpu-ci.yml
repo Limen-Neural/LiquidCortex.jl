@@ -1,0 +1,68 @@
+name: GPU CI (self-hosted)
+
+# Runs Julia package tests on the local RTX-class runner (labels: self-hosted, Linux, X64, gpu).
+# CPU smoke stays on ubuntu-latest in ci.yml; this job exercises CUDA kernels.
+on:
+  pull_request:
+    branches:
+      - '**'
+  push:
+    branches:
+      - main
+      - 'release/*'
+  workflow_dispatch:
+
+# Single GPU host: at most one GPU job for this repo at a time.
+# cancel-in-progress frees the card for the latest commit on a ref.
+concurrency:
+  group: liquidcortex-gpu-${{ github.repository }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-test:
+    name: Julia 1.12 — GPU tests (self-hosted)
+    runs-on: [self-hosted, Linux, X64, gpu]
+    timeout-minutes: 60
+
+    env:
+      # Optional: report step! failures to liquidcortex project during CI
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      JULIA_NUM_THREADS: "1"
+      # Prefer host CUDA / juliaup defaults already on the machine
+      JULIA_PKG_PRECOMPILE_AUTO: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Verify GPU + Julia
+        run: |
+          set -euo pipefail
+          command -v julia
+          julia --version
+          nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+          julia -e 'using CUDA; @assert CUDA.functional(); println(CUDA.name(CUDA.device()))'
+
+      - name: Instantiate
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+
+      - name: Run tests (CPU + GPU)
+        run: julia --project=. -e 'using Pkg; Pkg.test()'
+
+      - name: Reclaim GPU memory
+        if: always()
+        run: |
+          julia -e '
+            using CUDA
+            if CUDA.functional()
+              CUDA.synchronize()
+              GC.gc(true)
+              CUDA.reclaim()
+              free = CUDA.free_memory() / 1e9
+              total = CUDA.total_memory() / 1e9
+              println("VRAM free/total GB: ", round(free; digits=2), " / ", round(total; digits=2))
+            end
+          '

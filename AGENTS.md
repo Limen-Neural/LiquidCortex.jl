@@ -32,6 +32,11 @@ Julia package with CUDA acceleration, cuSPARSE Float16, STDP covariance learning
 - CPU tests always run (package load, API exports, config validation)
 - GPU tests gated by `LiquidCortex._cuda_available[]`
 - CI workflows run Julia **1.12** only (compat still declares 1.10–1.12)
+- **CPU smoke:** `.github/workflows/ci.yml` → `ubuntu-latest`
+- **GPU tests:** `.github/workflows/gpu-ci.yml` → self-hosted runner labels
+  `self-hosted`, `Linux`, `X64`, `gpu` (local RTX host under
+  `~/actions-runner/LiquidCortex.jl-runner/`, not inside the git clone)
+- GPU jobs use a repo-wide concurrency group so only one GPU suite runs at a time
 
 ## PR Instructions
 
