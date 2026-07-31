@@ -6,3 +6,8 @@ Manifest.toml
 # Local environment variables (contains secrets — never commit)
 .env
 .mimocode/
+
+# Local exploration / agent notes (never ship)
+.explore-notes/
+playground-results/
+.cursor/
