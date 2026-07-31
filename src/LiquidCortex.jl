@@ -57,6 +57,15 @@ function __init__()
     end
 end
 
+# Caller-facing validation (wrong kwargs / input size). Filtered from Sentry so
+# unit tests and API misuse do not create issues. Internal faults (malformed
+# CSC, CUDA OOM, unexpected ArgumentError from libs) remain captured.
+struct LiquidCortexValidationError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::LiquidCortexValidationError) =
+    print(io, "LiquidCortexValidationError: ", e.msg)
+
 # Accept any thrown value (Julia allows non-Exception throws) so capture never
 # raises MethodError and masks the original failure path.
 #
@@ -65,11 +74,19 @@ end
 # ensemble_step! before rethrow if capture were synchronous. Schedule capture
 # asynchronously and only wait briefly; drop waiting (and leave the task
 # running best-effort) if the queue is blocked.
-#
-# Skip API-contract errors (caller misuse / unit tests): ArgumentError and
-# DimensionMismatch are expected rethrows, not production faults.
 @noinline function _should_capture_runtime_exception(@nospecialize(exc))
-    return !(exc isa ArgumentError || exc isa DimensionMismatch)
+    return !(exc isa LiquidCortexValidationError)
+end
+
+@noinline function _tag_gpu_failure!(@nospecialize(exc))
+    if exc isa CUDA.OutOfGPUMemoryError
+        Sentry.set_tag("gpu_failure", "true")
+        Sentry.set_tag("error_class", "gpu_oom")
+    elseif exc isa CUDA.CuError
+        Sentry.set_tag("gpu_failure", "true")
+        Sentry.set_tag("error_class", "cuda_error")
+    end
+    return nothing
 end
 
 @noinline function _capture_runtime_exception(@nospecialize(exc), bt)
@@ -78,6 +95,7 @@ end
     try
         t = @async begin
             try
+                _tag_gpu_failure!(exc)
                 Sentry.capture_exception([(exc, bt)])
             catch sentry_error
                 @warn "LiquidCortex: Failed to capture exception in Sentry" exception=(sentry_error, catch_backtrace())

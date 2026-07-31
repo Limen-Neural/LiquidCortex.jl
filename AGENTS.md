@@ -31,13 +31,13 @@ Julia package with CUDA acceleration, cuSPARSE Float16, STDP covariance learning
 
 - CPU tests always run (package load, API exports, config validation)
 - GPU tests gated by `LiquidCortex._cuda_available[]`
-- All 3 Julia versions tested: 1.10, 1.11, 1.12
+- CI workflows run Julia **1.12** only (compat still declares 1.10–1.12)
 
 ## PR Instructions
 
 - Branch naming: `feature/`, `fix/`, `ci/`, `refactor/`, `docs/`
 - Run tests before pushing
-- All CI checks must pass (Julia 1.10/1.11/1.12, Codacy, CodeRabbit)
+- All CI checks must pass (Julia 1.12, Codacy, CodeRabbit)
 - Address all bot review threads before merge
 - Pin GitHub Actions to full commit SHAs (not tags)
 - Use `julia-actions/julia-processcoverage` for coverage — not Coverage.jl in Project.toml
