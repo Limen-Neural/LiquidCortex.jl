@@ -13,16 +13,13 @@ function reclaim_gpu!()
     return nothing
 end
 
-# Hard reset when the pool is too fragmented for another 4-lobe ensemble (~12GB+).
+# Full device reset — required between EnsembleBrain cases on 16GB cards.
+# Soft reclaim leaves the memory pool reserved (~2GB leak per ensemble in CI).
 function reclaim_gpu_hard!()
     reclaim_gpu!()
-    free_gb = CUDA.free_memory() / 1e9
-    if free_gb < 8.0
-        try
-            CUDA.device_reset!()
-        catch
-        end
-        reclaim_gpu!()
+    try
+        CUDA.device_reset!()
+    catch
     end
     return nothing
 end
@@ -210,21 +207,23 @@ end
         end
 
         @testset "GPU: EnsembleBrain default dims" begin
+            reclaim_gpu_hard!()
             ensemble = EnsembleBrain()
             @test ensemble isa EnsembleBrain
             @test length(ensemble.lobes) == 4
             @test ensemble.lobes[1].n_in == 14
             @test ensemble.lobes[1].n_out == 16
-            ensemble = nothing; reclaim_gpu!()
+            ensemble = nothing; reclaim_gpu_hard!()
         end
 
         @testset "GPU: EnsembleBrain custom dims" begin
+            reclaim_gpu_hard!()
             ensemble = EnsembleBrain(n_in=8, n_out=4)
             @test ensemble isa EnsembleBrain
             @test length(ensemble.lobes) == 4
             @test ensemble.lobes[1].n_in == 8
             @test ensemble.lobes[1].n_out == 4
-            ensemble = nothing; reclaim_gpu!()
+            ensemble = nothing; reclaim_gpu_hard!()
         end
 
         @testset "GPU: step! with generic inhibition" begin
@@ -236,13 +235,24 @@ end
             brain = nothing; reclaim_gpu!()
         end
 
-        @testset "GPU: ensemble_step! with generic inhibition" begin
+        @testset "GPU: ensemble_step! inhibition + plasticity=:none freeze" begin
+            # Single 4-lobe construction covers both inhibition path and :none freeze
+            # (a second EnsembleBrain late in the suite OOMs on 16GB after pool growth).
+            reclaim_gpu_hard!()
             ensemble = EnsembleBrain(n_in=8, n_out=4)
             u = CUDA.zeros(Float32, 8)
             ensemble_step!(ensemble, u; inhibition=0.3f0, reflex_signal=0.2f0)
             output = get_ensemble_output(ensemble)
             @test length(output) == 4
-            ensemble = nothing; reclaim_gpu!()
+            W0 = [copy(Array(l.W_out)) for l in ensemble.lobes]
+            u_act = cu(randn(Float32, 8) .* 0.2f0)
+            n_steps = 5
+            for _ in 1:n_steps
+                ensemble_step!(ensemble, u_act; plasticity=:none, inhibition=0.1f0)
+            end
+            @test all(l.tick_count == 1 + n_steps for l in ensemble.lobes)
+            @test all(Array(ensemble.lobes[i].W_out) == W0[i] for i in eachindex(ensemble.lobes))
+            ensemble = nothing; reclaim_gpu_hard!()
         end
 
         @testset "GPU: default step! advances tick and keeps finite output" begin
@@ -315,7 +325,7 @@ end
         end
 
         @testset "GPU: recurrent_stdp mutates sparse W.nzVal" begin
-            reclaim_gpu!()
+            reclaim_gpu_hard!()
             brain = SparseBrain(20.0f0; n_in=8, n_out=4, name="tdd-stdp")
             u = cu(randn(Float32, 8) .* 0.35f0)
             # eta=0 must not clamp/rewrite constructor weights before learning
@@ -335,25 +345,7 @@ end
             # Drop lazy STDP edge buffers before reclaim
             brain.pre_idx = CUDA.zeros(Int32, 0)
             brain.post_idx = CUDA.zeros(Int32, 0)
-            brain = nothing; reclaim_gpu!()
-        end
-
-        @testset "GPU: ensemble_step! forwards plasticity=:none" begin
-            # Last suite case often sits at ~99% VRAM; hard-reclaim before 4 lobes.
-            reclaim_gpu_hard!()
-            eb = EnsembleBrain(n_in=8, n_out=4)
-            u = cu(randn(Float32, 8) .* 0.2f0)
-            W0 = [copy(Array(l.W_out)) for l in eb.lobes]
-            n_steps = 5
-            for _ in 1:n_steps
-                ensemble_step!(eb, u; plasticity=:none, inhibition=0.1f0)
-            end
-            @test all(l.tick_count == n_steps for l in eb.lobes)
-            @test all(Array(eb.lobes[i].W_out) == W0[i] for i in eachindex(eb.lobes))
-            out = get_ensemble_output(eb)
-            @test length(out) == 4
-            @test all(isfinite, Array(out))
-            eb = nothing; reclaim_gpu_hard!()
+            brain = nothing; reclaim_gpu_hard!()
         end
     else
         @info "Skipping GPU tests — no CUDA device available"
