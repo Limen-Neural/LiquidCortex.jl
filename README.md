@@ -60,13 +60,30 @@ output = get_output(brain)
 |-----------------|-------------|
 | `SparseBrain(tau_m; n_in, n_out)` | Create a 65,536-neuron sparse reservoir lobe |
 | `EnsembleBrain(; n_in, n_out)` | Create 4-lobe ensemble (262,144 neurons) |
-| `step!(brain, u; inhibition, reflex_eta)` | Execute one simulation timestep |
-| `ensemble_step!(eb, u; inhibition, reflex_eta, reflex_signal)` | Step all lobes and aggregate |
+| `step!(brain, u; inhibition, reflex_eta, ...)` | Execute one simulation timestep (see experimental kwargs) |
+| `ensemble_step!(eb, u; inhibition, reflex_eta, reflex_signal, ...)` | Step all lobes and aggregate |
 | `get_output(brain)` | Copy readout from GPU to CPU |
 | `get_ensemble_output(eb)` | Copy aggregated readout |
 | `compute_reservoir_covariance!(brain)` | Compute subsampled covariance matrix |
 | `diagnostics(brain)` | Return diagnostic string |
 | `ensemble_diagnostics(eb)` | Per-lobe diagnostic summary |
+
+## Experimental step API
+
+LiquidCortex is an experimental Julia package. Defaults are intentional:
+
+| Keyword | Default | Meaning |
+|---------|---------|---------|
+| `plasticity` | `:readout_only` | Frozen recurrent `W`; Hebbian `W_out` every 10 ticks |
+| `plasticity` | `:recurrent_stdp` | Experimental pair STDP on sparse edges every tick |
+| `plasticity` | `:none` | No weight updates |
+| `recurrent_eta` | `1f-4` | Learning rate for `:recurrent_stdp` |
+| `sync` | `true` | `CUDA.synchronize()` at end of step |
+| `record_history` | `true` | Write spike history for covariance helpers |
+| `use_device_noise` | `false` | Host Gaussian noise upload (device RNG optional) |
+
+Recurrent reservoir weights are **not** trained under the default path.
+Requires **CUDA.jl 6.x**. Local verification uses **Julia 1.12**.
 
 ## OU-SDE Membrane Dynamics
 
