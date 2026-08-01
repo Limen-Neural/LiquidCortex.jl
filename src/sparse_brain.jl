@@ -73,6 +73,25 @@ function cpu_randn_cu(dims::Vararg{Int,N}) where {N}
     return cu(randn(Float32, dims...))
 end
 
+# ── Pair STDP on existing sparse edges (experimental plasticity=:recurrent_stdp) ─
+function _pair_stdp_kernel!(nzVal, pre_idx, post_idx, trace_pre, trace_post, S,
+                            eta::Float32, w_max::Float32, nnz::Int32)
+    i = (blockIdx().x - Int32(1)) * blockDim().x + threadIdx().x
+    @inbounds if i <= nnz
+        pre = pre_idx[i]
+        post = post_idx[i]
+        # Pair rule: LTP when pre-trace co-occurs with post spike; LTD reverse
+        dw = eta * (trace_pre[pre] * S[post] - S[pre] * trace_post[post])
+        # Skip clamp/write when dw==0 so eta=0 (or silent edges) never truncates
+        # constructor weights that may exceed |W_MAX| before any learning.
+        if dw != 0.0f0
+            w = clamp(Float32(nzVal[i]) + dw, -w_max, w_max)
+            nzVal[i] = Float16(w)
+        end
+    end
+    return nothing
+end
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SparseBrain: The 65,536-Neuron CUDA Reservoir
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -80,6 +99,11 @@ end
 mutable struct SparseBrain
     # ── Synaptic weights (sparse, Float16 on GPU) ────────────────────────────
     W::CUDA.CUSPARSE.CuSparseMatrixCSC{Float16,Int32}
+
+    # Edge lists aligned with W.nzVal (1-based): pre = column, post = row for W*S
+    pre_idx::CuVector{Int32}
+    post_idx::CuVector{Int32}
+    nnz::Int
 
     # ── Input / Output weight matrices (dense, Float32) ──────────────────────
     W_in::CuMatrix{Float32}
@@ -89,6 +113,12 @@ mutable struct SparseBrain
     V::CuVector{Float32}          # Membrane potential
     S::CuVector{Float32}          # Spike state (0 or 1)
     refrac::CuVector{Int32}       # Refractory counter
+
+    # ── Work buffers (reused every tick) ─────────────────────────────────────
+    S_f16::CuVector{Float16}
+    I_rec::CuVector{Float32}
+    I_ext::CuVector{Float32}
+    noise::CuVector{Float32}
 
     # ── STDP eligibility traces ──────────────────────────────────────────────
     trace_pre::CuVector{Float32}  # Pre-synaptic trace
@@ -165,7 +195,12 @@ function SparseBrain(tau_m::Float32; n_in::Int=14, n_out::Int=16, name::String="
     println("[brain:$name] W_sparse: $(actual_nnz) nnz, ρ≈$(round(target_rho, digits=2))")
 
     # Transfer to GPU as CuSparseMatrixCSC
+    # Edge lists for pair STDP are built lazily in `_ensure_edge_indices!`
+    # (saves ~2×Int32×nnz ≈ 340 MB/lobe when STDP is unused).
     W_gpu = CUDA.CUSPARSE.CuSparseMatrixCSC(W_cpu)
+    edge_nnz = nnz(W_cpu)
+    pre_idx = CUDA.zeros(Int32, 0)
+    post_idx = CUDA.zeros(Int32, 0)
 
     # ── 2. Input weight matrix (Dense, Xavier init) ──────────────────────────
     W_in = cpu_randn_cu(N, n_in)
@@ -181,6 +216,10 @@ function SparseBrain(tau_m::Float32; n_in::Int=14, n_out::Int=16, name::String="
     V = CUDA.fill(Float32(V_REST), N)
     S = CUDA.zeros(Float32, N)
     refrac = CUDA.zeros(Int32, N)
+    S_f16 = CUDA.zeros(Float16, N)
+    I_rec = CUDA.zeros(Float32, N)
+    I_ext = CUDA.zeros(Float32, N)
+    noise = CUDA.zeros(Float32, N)
 
     # ── 5. STDP traces ──────────────────────────────────────────────────────
     trace_pre = CUDA.zeros(Float32, N)
@@ -197,8 +236,10 @@ function SparseBrain(tau_m::Float32; n_in::Int=14, n_out::Int=16, name::String="
     println("[brain:$name] ✓ Lobe initialized (τ_m=$(tau_m)ms)")
 
     SparseBrain(
-        W_gpu, W_in, W_out,
+        W_gpu, pre_idx, post_idx, edge_nnz,
+        W_in, W_out,
         V, S, refrac,
+        S_f16, I_rec, I_ext, noise,
         trace_pre, trace_post,
         output,
         n_in, n_out,
@@ -209,40 +250,132 @@ function SparseBrain(tau_m::Float32; n_in::Int=14, n_out::Int=16, name::String="
     )
 end
 
+const PLASTICITY_MODES = (:readout_only, :recurrent_stdp, :none)
+
+"""Materialize CSC edge lists for pair STDP (lazy — avoids ~300MB/lobe when unused)."""
+function _ensure_edge_indices!(brain::SparseBrain)
+    # Both buffers must be complete; a partial upload (pre ok, post failed) must rebuild.
+    length(brain.pre_idx) == brain.nnz && length(brain.post_idx) == brain.nnz &&
+        brain.nnz > 0 && return nothing
+    colPtr = Array(brain.W.colPtr)
+    rowVal = Array(brain.W.rowVal)
+    n_cols = length(colPtr) - 1
+    edge_nnz = length(rowVal)
+    # CSC invariants (1-based Julia SparseArrays). Failures here are internal
+    # faults and remain Sentry-captured (not LiquidCortexValidationError).
+    colPtr[1] == 1 ||
+        throw(ArgumentError("Malformed CSC: colPtr[1]=$(colPtr[1]), expected 1"))
+    colPtr[end] == edge_nnz + 1 ||
+        throw(ArgumentError("Malformed CSC: colPtr[end]=$(colPtr[end]) vs nnz+1=$(edge_nnz + 1)"))
+    @inbounds for col in 1:n_cols
+        colPtr[col + 1] >= colPtr[col] ||
+            throw(ArgumentError(
+                "Malformed CSC: non-monotonic colPtr at col=$col ($(colPtr[col]) > $(colPtr[col + 1]))"))
+    end
+    pre = Vector{Int32}(undef, edge_nnz)
+    post = Vector{Int32}(undef, edge_nnz)
+    k = 1
+    @inbounds for col in 1:n_cols
+        p_lo = colPtr[col]
+        p_hi = colPtr[col + 1] - 1
+        p_hi > edge_nnz && throw(ArgumentError(
+            "Malformed CSC: colPtr[$(col + 1)]=$(colPtr[col + 1]) exceeds nnz=$edge_nnz"))
+        for p in p_lo:p_hi
+            post[k] = Int32(rowVal[p])
+            pre[k] = Int32(col)
+            k += 1
+        end
+    end
+    brain.pre_idx = CuArray(pre)
+    brain.post_idx = CuArray(post)
+    brain.nnz = edge_nnz
+    return nothing
+end
+
+function _apply_pair_stdp!(brain; eta::Float32)
+    # eta==0: no learning and no clamp/rewrite of existing weights
+    eta == 0.0f0 && return nothing
+    _ensure_edge_indices!(brain)
+    nnz = Int32(brain.nnz)
+    nnz == 0 && return nothing
+    threads = 256
+    blocks = cld(Int(nnz), threads)
+    @cuda threads=threads blocks=blocks _pair_stdp_kernel!(
+        brain.W.nzVal, brain.pre_idx, brain.post_idx,
+        brain.trace_pre, brain.trace_post, brain.S,
+        eta, W_MAX, nnz)
+    return nothing
+end
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Simulation Step: OU-SDE Dynamics + STDP Learning
 # ═══════════════════════════════════════════════════════════════════════════════
 
+"""CPU-safe plasticity/recurrent_eta checks (no GPU types)."""
+function _validate_plasticity_kwargs(; plasticity::Symbol, recurrent_eta::Real)
+    plasticity in PLASTICITY_MODES || throw(LiquidCortexValidationError(
+        "plasticity must be one of $PLASTICITY_MODES, got :$plasticity"))
+    if plasticity === :recurrent_stdp
+        isfinite(Float32(recurrent_eta)) || throw(LiquidCortexValidationError(
+            "recurrent_eta must be finite, got $recurrent_eta"))
+    end
+    return nothing
+end
+
+"""Validate public step kwargs. Throws `LiquidCortexValidationError` on misuse."""
+function _validate_step_kwargs!(brain::SparseBrain, u::AbstractVector;
+    plasticity::Symbol, recurrent_eta::Real)
+    length(u) == brain.n_in || throw(LiquidCortexValidationError(
+        "input has length $(length(u)), expected $(brain.n_in)"))
+    _validate_plasticity_kwargs(; plasticity=plasticity, recurrent_eta=recurrent_eta)
+    return nothing
+end
+
 # Internal implementation; public entry point is `step!` (with Sentry capture).
 function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
-    reflex_eta::Real=ETA)
-    length(u) == brain.n_in || throw(DimensionMismatch("input has length $(length(u)), expected $(brain.n_in)"))
+    reflex_eta::Real=ETA,
+    plasticity::Symbol=:readout_only,
+    recurrent_eta::Real=1.0f-4,
+    sync::Bool=true,
+    record_history::Bool=true,
+    use_device_noise::Bool=false)
+    _validate_step_kwargs!(brain, u; plasticity=plasticity, recurrent_eta=recurrent_eta)
     brain.tick_count += 1
     inhibition = Float32(inhibition)
     reflex_eta = Float32(reflex_eta)
+    recurrent_eta = Float32(recurrent_eta)
 
     # ── 1. Global Inhibition ─────────────────────────────────────────────────
     inhib = clamp(inhibition, 0.0f0, MAX_INHIBITION)
     brain.v_thresh_dynamic = V_THRESH + inhib * INHIBITION_GAIN
 
     # ── 2. OU-SDE Membrane Dynamics (per-lobe τ_m) ──────────────────────────
-    # Recurrent input: I_rec = W · S (sparse mat-vec on GPU via cuSPARSE)
-    I_rec = brain.W * Float16.(brain.S)
-    I_rec_f32 = Float32.(I_rec)
+    # F16×F16 SpMV via * (generic mul! on F16 CSC can hit scalar indexing)
+    brain.S_f16 .= Float16.(brain.S)
+    y_sp = brain.W * brain.S_f16
+    brain.I_rec .= Float32.(y_sp)
 
-    # External input: I_ext = W_in · u
-    I_ext = brain.W_in * u
+    mul!(brain.I_ext, brain.W_in, u)
 
-    # OU noise: σ · dWₜ (Wiener process increment)
-    noise = cpu_randn_cu(N)
-    noise .*= OU_NOISE_SCALE
+    # Host noise is the portable default; device RNG may fail on some stacks.
+    if use_device_noise
+        try
+            Random.randn!(brain.noise)
+        catch e
+            # Preserve cancel / GPU faults; only fall back for RNG path failures.
+            e isa InterruptException && rethrow()
+            e isa CUDA.OutOfGPUMemoryError && rethrow()
+            e isa CUDA.CuError && rethrow()
+            copyto!(brain.noise, randn(Float32, N))
+        end
+    else
+        copyto!(brain.noise, randn(Float32, N))
+    end
+    brain.noise .*= OU_NOISE_SCALE
 
-    # Leak + input + noise — uses per-lobe brain.tau_m
-    # dV = ((V_rest - V) / τ_m + I_rec + I_ext) * dt + noise
-    dV = ((V_REST .- brain.V) ./ brain.tau_m .+ I_rec_f32 .+ I_ext) .* DT .+ noise
+    dV = ((V_REST .- brain.V) ./ brain.tau_m .+ brain.I_rec .+ brain.I_ext) .* DT .+ brain.noise
 
-    # Refractory mask: neurons in refractory period don't integrate
     active_mask = brain.refrac .<= 0
     brain.V .+= dV .* Float32.(active_mask)
 
@@ -250,62 +383,87 @@ function _step_impl!(brain::SparseBrain, u::CuVector{Float32};
     spiked = brain.V .> brain.v_thresh_dynamic
     brain.S .= Float32.(spiked)
 
-    # Reset spiked neurons
     brain.V .= ifelse.(spiked, Float32(V_RESET), brain.V)
     brain.refrac .= ifelse.(spiked, Int32(REFRAC_T), max.(brain.refrac .- Int32(1), Int32(0)))
 
-    # Count spikes for diagnostics
-    n_spikes = sum(brain.S)
-    brain.total_spikes += round(Int64, n_spikes)
-    brain.last_spike_rate = n_spikes / N
-
-    # ── 4. Record spike history (rolling circular buffer) ────────────────────
-    brain.history[brain.hist_idx, :] .= brain.S
-    brain.hist_idx += 1
-    if brain.hist_idx > HIST_DEPTH
-        brain.hist_idx = 1
-        brain.hist_full = true
+    # Host reductions force a stream wait. Skip when sync=false so ensemble
+    # mid-lobe loops do not reintroduce implicit barriers (bench / chain mode).
+    if sync
+        n_spikes = sum(brain.S)
+        brain.total_spikes += round(Int64, n_spikes)
+        brain.last_spike_rate = n_spikes / N
     end
 
-    # ── 5. STDP Covariance Learning (reflex_eta enables flash-learning) ─────
+    # ── 4. Optional history ──────────────────────────────────────────────────
+    if record_history
+        brain.history[brain.hist_idx, :] .= brain.S
+        brain.hist_idx += 1
+        if brain.hist_idx > HIST_DEPTH
+            brain.hist_idx = 1
+            brain.hist_full = true
+        end
+    end
+
+    # ── 5. Traces + learning ─────────────────────────────────────────────────
     brain.trace_pre .= brain.trace_pre .* (1.0f0 - DT / TAU_TRACE) .+ brain.S
     brain.trace_post .= brain.trace_post .* (1.0f0 - DT / TAU_TRACE) .+ brain.S
 
-    # STDP weight update on W_out every 10 ticks (Hebbian readout rule):
-    # ΔW_out[i,j] = reflex_eta * S_out[i] * trace_pre[j]
-    if brain.tick_count % 10 == 0
+    if plasticity === :recurrent_stdp
+        _apply_pair_stdp!(brain; eta=recurrent_eta)
+    end
+
+    if plasticity !== :none && brain.tick_count % 10 == 0
         S_out = brain.output .> 0.0f0
         dW_out = reflex_eta .* (Float32.(S_out) * brain.trace_pre')
         brain.W_out .+= dW_out
         clamp!(brain.W_out, -W_MAX, W_MAX)
     end
 
-    # ── 6. Readout Layer ──────────────────────────────────────────────────────
-    brain.output .= brain.W_out * brain.S
+    # ── 6. Readout ───────────────────────────────────────────────────────────
+    mul!(brain.output, brain.W_out, brain.S)
 
-    CUDA.synchronize()
+    sync && CUDA.synchronize()
     return nothing
 end
 
 """
-    step!(brain, u; inhibition=0.0, reflex_eta=ETA)
+    step!(brain, u; inhibition=0.0, reflex_eta=ETA, plasticity=:readout_only,
+          recurrent_eta=1f-4, sync=true, record_history=true, use_device_noise=false)
 
-Execute one simulation timestep:
+Execute one simulation timestep.
 
-1. **Global Inhibition**: Caller-provided `inhibition` raises V_thresh.
-2. **OU-SDE Dynamics**:
-   dV_j = ((V_rest - V_j)/τ_m + Σᵢ Wᵢⱼ·Sᵢ(t) + W_in·u) dt + σ·dWₜ
-3. **Spike Detection**: V_j > V_thresh_dynamic → spike, reset to V_reset
-4. **STDP Update**: ΔWᵢⱼ = η · trace_pre_i · trace_post_j (covariance rule)
-5. **Readout**: y = W_out · S (weighted spike count)
+# Keywords
+- `inhibition`: global inhibition level (default `0.0`, clamped to `[0, MAX_INHIBITION]`).
+- `reflex_eta`: Hebbian learning rate for `W_out` (default `ETA`).
+- `plasticity`: `:readout_only` (default, frozen W + Hebbian W_out every 10 ticks),
+  `:recurrent_stdp` (pair STDP every tick on sparse W nonzeros + readout Hebbian),
+  `:none` (no weight updates).
+- `recurrent_eta`: learning rate for pair STDP (default `1f-4`; must be finite when
+  `plasticity=:recurrent_stdp`). Independent of `reflex_eta` / reflex gating.
+- `sync`: call `CUDA.synchronize()` at end (default `true`).
+- `record_history`: write spike history row (default `true`).
+- `use_device_noise`: device `randn!` vs host upload (default `false`).
 
 Runtime exceptions are captured to Sentry (when configured) before rethrow.
+API misuse raises `LiquidCortexValidationError` and is not reported to Sentry.
 """
 function step!(brain::SparseBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
-    reflex_eta::Real=ETA)
+    reflex_eta::Real=ETA,
+    plasticity::Symbol=:readout_only,
+    recurrent_eta::Real=1.0f-4,
+    sync::Bool=true,
+    record_history::Bool=true,
+    use_device_noise::Bool=false)
     try
-        _step_impl!(brain, u; inhibition=inhibition, reflex_eta=reflex_eta)
+        _step_impl!(brain, u;
+            inhibition=inhibition,
+            reflex_eta=reflex_eta,
+            plasticity=plasticity,
+            recurrent_eta=recurrent_eta,
+            sync=sync,
+            record_history=record_history,
+            use_device_noise=use_device_noise)
     catch exc
         _capture_runtime_exception(exc, catch_backtrace())
         rethrow()
@@ -417,7 +575,8 @@ function EnsembleBrain(; n_in::Int=14, n_out::Int=16)
     agg_output = CUDA.zeros(Float32, n_out)
 
     CUDA.synchronize()
-    free_mem = CUDA.available_memory() / 1e9
+    # CUDA.jl 6+: free_memory() replaces available_memory()
+    free_mem = CUDA.free_memory() / 1e9
     total_mem = CUDA.total_memory() / 1e9
     used = total_mem - free_mem
     println("═══════════════════════════════════════════════════════════════")
@@ -432,56 +591,104 @@ end
 function _ensemble_step_impl!(eb::EnsembleBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
     reflex_eta::Real=ETA,
-    reflex_signal::Real=0.0f0)
+    reflex_signal::Real=0.0f0,
+    plasticity::Symbol=:readout_only,
+    recurrent_eta::Real=1.0f-4,
+    sync::Bool=true,
+    record_history::Bool=true,
+    use_device_noise::Bool=false)
     inhibition = Float32(inhibition)
     reflex_eta = Float32(reflex_eta)
     reflex_signal = Float32(reflex_signal)
-    # Reflex Gating: boost Fast lobe STDP when signal exceeds threshold
+    # Reflex gating boosts Fast-lobe *readout* Hebbian only (`reflex_eta`).
+    # Recurrent pair-STDP always uses the caller's `recurrent_eta` (independent).
     reflex_fast = if abs(reflex_signal) > 0.1f0
         reflex_eta * 5.0f0   # 5× flash-learning rate
     else
         reflex_eta            # Normal learning rate
     end
 
-    # Step all lobes with generic inhibition
+    # Validate once before any STDP edge prewarm (avoids large allocs on bad kwargs).
+    isempty(eb.lobes) || _validate_step_kwargs!(eb.lobes[1], u;
+        plasticity=plasticity, recurrent_eta=recurrent_eta)
+
+    # Prewarm STDP edge lists before the async lobe loop so the first
+    # :recurrent_stdp ensemble step does not host-sync mid-loop per lobe.
+    if plasticity === :recurrent_stdp && Float32(recurrent_eta) != 0.0f0
+        for lobe in eb.lobes
+            _ensure_edge_indices!(lobe)
+        end
+    end
+
+    # Step all lobes; suppress mid-lobe sync (single sync after aggregate)
     for (i, lobe) in enumerate(eb.lobes)
         eta_lobe = (i == 1) ? reflex_fast : reflex_eta  # Lobe 1 = Fast
-        _step_impl!(lobe, u; inhibition=inhibition, reflex_eta=eta_lobe)
+        _step_impl!(lobe, u;
+            inhibition=inhibition,
+            reflex_eta=eta_lobe,
+            plasticity=plasticity,
+            recurrent_eta=recurrent_eta,
+            sync=false,
+            record_history=record_history,
+            use_device_noise=use_device_noise)
     end
 
     # Aggregate readouts: weighted sum across lobes
-    # Fast (0.4) + Medium (0.3) + Slow (0.2) + Integrator (0.1) = 1.0
     eb.agg_output .= 0.0f0
     for (i, lobe) in enumerate(eb.lobes)
         eb.agg_output .+= eb.weights[i] .* lobe.output
     end
 
-    CUDA.synchronize()
+    # Diagnostics deferred to end of ensemble (lobes used sync=false).
+    if sync
+        for lobe in eb.lobes
+            n_spikes = sum(lobe.S)
+            lobe.total_spikes += round(Int64, n_spikes)
+            lobe.last_spike_rate = n_spikes / N
+        end
+        CUDA.synchronize()
+    end
     return nothing
 end
 
 """
-    ensemble_step!(eb, u; inhibition=0.0, reflex_eta=ETA, reflex_signal=0.0)
+    ensemble_step!(eb, u; inhibition=0.0, reflex_eta=ETA, reflex_signal=0.0,
+                   plasticity=:readout_only, recurrent_eta=1f-4, sync=true,
+                   record_history=true, use_device_noise=false)
 
 Step all 4 lobes independently on the same input, then aggregate readouts.
 
-Reflex Gating: When |reflex_signal| > 0.1, the Fast lobe (index 1, τ_m=10ms)
-  gets a 5× learning rate boost, enabling rapid synaptic adaptation.
+# Keywords
+- `inhibition`, `reflex_eta`, `plasticity`, `recurrent_eta`, `sync`,
+  `record_history`, `use_device_noise`: forwarded to each lobe's `step!`.
+- `reflex_signal`: when `|reflex_signal| > 0.1`, Fast lobe (index 1, τ_m=10ms)
+  gets a 5× **readout** learning-rate boost (`reflex_eta` only). Does not scale
+  `recurrent_eta` / pair STDP.
 
-Keyword `reflex_eta` (default `ETA`) is the base STDP rate for every lobe;
-the Fast lobe uses `5× reflex_eta` when reflex gating is active.
+Mid-lobe `CUDA.synchronize()` is suppressed; one sync runs after aggregation
+when `sync=true`. Spike-rate host reductions also run only when `sync=true`.
 
 Runtime exceptions are captured to Sentry (when configured) before rethrow.
 """
 function ensemble_step!(eb::EnsembleBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
     reflex_eta::Real=ETA,
-    reflex_signal::Real=0.0f0)
+    reflex_signal::Real=0.0f0,
+    plasticity::Symbol=:readout_only,
+    recurrent_eta::Real=1.0f-4,
+    sync::Bool=true,
+    record_history::Bool=true,
+    use_device_noise::Bool=false)
     try
         _ensemble_step_impl!(eb, u;
             inhibition=inhibition,
             reflex_eta=reflex_eta,
-            reflex_signal=reflex_signal)
+            reflex_signal=reflex_signal,
+            plasticity=plasticity,
+            recurrent_eta=recurrent_eta,
+            sync=sync,
+            record_history=record_history,
+            use_device_noise=use_device_noise)
     catch exc
         _capture_runtime_exception(exc, catch_backtrace())
         rethrow()
@@ -516,16 +723,33 @@ end
 # ── step! for EnsembleBrain ──
 
 """
-    step!(eb::EnsembleBrain, u; inhibition=0.0, reflex_eta=ETA, reflex_signal=0.0)
+    step!(eb::EnsembleBrain, u; inhibition=0.0, reflex_eta=ETA, reflex_signal=0.0,
+          plasticity=:readout_only, recurrent_eta=1f-4, sync=true,
+          record_history=true, use_device_noise=false)
 
 Forwards to [`ensemble_step!`](@ref).
 Keyword `reflex_signal` (default `0`) controls fast-lobe reflex gating.
+Also forwards `plasticity`, `recurrent_eta`, `sync`, `record_history`, and
+`use_device_noise`.
 """
 function step!(eb::EnsembleBrain, u::CuVector{Float32};
     inhibition::Real=0.0f0,
     reflex_eta::Real=ETA,
-    reflex_signal::Real=0.0f0)
-    ensemble_step!(eb, u; inhibition=Float32(inhibition), reflex_eta=Float32(reflex_eta), reflex_signal=Float32(reflex_signal))
+    reflex_signal::Real=0.0f0,
+    plasticity::Symbol=:readout_only,
+    recurrent_eta::Real=1.0f-4,
+    sync::Bool=true,
+    record_history::Bool=true,
+    use_device_noise::Bool=false)
+    ensemble_step!(eb, u;
+        inhibition=inhibition,
+        reflex_eta=reflex_eta,
+        reflex_signal=reflex_signal,
+        plasticity=plasticity,
+        recurrent_eta=recurrent_eta,
+        sync=sync,
+        record_history=record_history,
+        use_device_noise=use_device_noise)
     return nothing
 end
 

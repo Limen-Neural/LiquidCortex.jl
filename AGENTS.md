@@ -23,23 +23,37 @@ Julia package with CUDA acceleration, cuSPARSE Float16, STDP covariance learning
 - Julia standard formatting
 - No domain-specific code in core (market/mining removed in PR #12)
 - Generic inhibition interface: `step!(brain::SparseBrain, u::CuVector{Float32}; inhibition::Real=0.0, reflex_eta::Real=ETA)`
+- Step kwargs: `plasticity=:readout_only` (default), `:recurrent_stdp`, `:none`; plus `sync`, `record_history`, `use_device_noise`, `recurrent_eta`
 - Configurable dimensions: `SparseBrain(tau_m::Float32; n_in::Int=14, n_out::Int=16, name::String="default")`
+- Compat: CUDA.jl `6` (latest); local TDD/verify on Julia 1.12
 
 ## Testing
 
 - CPU tests always run (package load, API exports, config validation)
 - GPU tests gated by `LiquidCortex._cuda_available[]`
-- All 3 Julia versions tested: 1.10, 1.11, 1.12
+- CI workflows run Julia **1.12** only (compat still declares 1.10–1.12)
+- **CPU smoke:** `.github/workflows/ci.yml` → `ubuntu-latest`
+- **GPU tests:** `.github/workflows/gpu-ci.yml` → self-hosted runner labels
+  `self-hosted`, `Linux`, `X64`, `gpu` (local RTX host under
+  `~/actions-runner/LiquidCortex.jl-runner/`, not inside the git clone)
+- GPU jobs use a repo-wide concurrency group so only one GPU suite runs at a time
 
 ## PR Instructions
 
 - Branch naming: `feature/`, `fix/`, `ci/`, `refactor/`, `docs/`
 - Run tests before pushing
-- All CI checks must pass (Julia 1.10/1.11/1.12, Codacy, CodeRabbit)
+- All CI checks must pass (Julia 1.12, Codacy, CodeRabbit)
 - Address all bot review threads before merge
 - Pin GitHub Actions to full commit SHAs (not tags)
 - Use `julia-actions/julia-processcoverage` for coverage — not Coverage.jl in Project.toml
 - README must use pure markdown — no HTML elements (Codacy lints `<a>` and `<img>`)
+
+## Sentry
+
+- Runtime capture uses `ENV["SENTRY_DSN"]` (see `.env.example`).
+- DSN **must** target project **`liquidcortex`** (`SENTRY_ORG=limen-neural`, `SENTRY_PROJECT=liquidcortex`).
+- Do **not** reuse the **rust** project DSN — events will misroute (issue IDs like `RUST-*` with `package=LiquidCortex.jl`).
+- Quick check: DSN path suffix for liquidcortex is `…/4511697978982400` (rust ends in `…/4511355448066048`).
 
 ## Cursor Cloud specific instructions
 

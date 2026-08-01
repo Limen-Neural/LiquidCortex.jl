@@ -17,7 +17,7 @@
 
 ### CI/CD
 
-- [ ] All Julia versions pass (1.10, 1.11, 1.12)
+- [ ] Julia 1.12 CI passes (CPU ubuntu-latest + GPU self-hosted when available)
 - [ ] No Codacy warnings (SHA-pinned actions, no inline HTML in markdown)
 - [ ] No unresolved bot review threads
 

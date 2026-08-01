@@ -57,6 +57,15 @@ function __init__()
     end
 end
 
+# Caller-facing validation (wrong kwargs / input size). Filtered from Sentry so
+# unit tests and API misuse do not create issues. Internal faults (malformed
+# CSC, CUDA OOM, unexpected ArgumentError from libs) remain captured.
+struct LiquidCortexValidationError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::LiquidCortexValidationError) =
+    print(io, "LiquidCortexValidationError: ", e.msg)
+
 # Accept any thrown value (Julia allows non-Exception throws) so capture never
 # raises MethodError and masks the original failure path.
 #
@@ -65,12 +74,38 @@ end
 # ensemble_step! before rethrow if capture were synchronous. Schedule capture
 # asynchronously and only wait briefly; drop waiting (and leave the task
 # running best-effort) if the queue is blocked.
+@noinline function _should_capture_runtime_exception(@nospecialize(exc))
+    return !(exc isa LiquidCortexValidationError)
+end
+
+# Sentry.jl tags are process-global. Serialize tag+capture so concurrent async
+# captures cannot cross-label each other's events.
+const _sentry_capture_lock = ReentrantLock()
+
+@noinline function _tag_runtime_exception!(@nospecialize(exc))
+    if exc isa CUDA.OutOfGPUMemoryError
+        Sentry.set_tag("gpu_failure", "true")
+        Sentry.set_tag("error_class", "gpu_oom")
+    elseif exc isa CUDA.CuError
+        Sentry.set_tag("gpu_failure", "true")
+        Sentry.set_tag("error_class", "cuda_error")
+    else
+        Sentry.set_tag("gpu_failure", "false")
+        Sentry.set_tag("error_class", "runtime")
+    end
+    return nothing
+end
+
 @noinline function _capture_runtime_exception(@nospecialize(exc), bt)
     _sentry_enabled[] || return nothing
+    _should_capture_runtime_exception(exc) || return nothing
     try
         t = @async begin
             try
-                Sentry.capture_exception([(exc, bt)])
+                lock(_sentry_capture_lock) do
+                    _tag_runtime_exception!(exc)
+                    Sentry.capture_exception([(exc, bt)])
+                end
             catch sentry_error
                 @warn "LiquidCortex: Failed to capture exception in Sentry" exception=(sentry_error, catch_backtrace())
             end
